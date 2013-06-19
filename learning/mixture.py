@@ -4,28 +4,58 @@ import pandas
 import numpy
 from matplotlib import pyplot
 
+class MixtureModel(object):
+    
+    def __init__(self, target, A, mask, l2reg = 0., center = True):
+        
+        self.A = A
+        if center:
+            self.A = numpy.hstack([A, numpy.ones((A.shape[0],1))])
+        not_mask = numpy.array(map(lambda x: not x, mask))
+        meas = {'train': meas[mask], 'test': meas[not_mask]} 
+        hrrr = {'train': hrrr[mask], 'test': hrrr[not_mask]} # need hrrr/nam training?
+        nam = {'train': nam[mask], 'test': nam[not_mask]} 
+        A  = {'train': A[mask,:], 'test': A[not_mask,:]} 
+
+        C = numpy.dot(A['train'].T, A['train']) + l2reg * numpy.eye(A['train'].shape[1])
+        b = numpy.dot(A['train'].T, meas['train'])
+        w = numpy.linalg.solve(C, b)
+       
+        sq_err = {'mix': (meas['test'] - numpy.dot(A['test'],w))**2,
+                  'hrrr': (meas['test'] - hrrr['test'])**2,
+                  'nam': (meas['test'] - nam['test'])**2}
+        
+        error = {}; std_err = {};
+        for mod in ['mix', 'hrrr', 'nam']:
+            error[mod] = numpy.sqrt(numpy.mean(sq_err[mod]))
+            std_err[mod] = numpy.sqrt(numpy.std(sq_err[mod])) / numpy.sqrt(len(sq_err[mod]))
+
+
+
 def main(
-    path_root = 'prediction/20130606',
+    path_root = 'data/prediction/',
     to_predict = 'Total', #'Diff',# 'DirNorm', #
     l2reg = 0., 
-    hold_out = (5,16),
+    hold_out = None, #(5,16),
+    n_folds = 10,
     center = True,
     abs_diff = False,
-    plot = True):
+    plot = True, 
+    models = ['mix','hrrr','nam']):
 
     paths = glob.glob(path_root + '/*.csv')
 
-    n_sites = len(paths)
-    error = {'mix' : [0.]*n_sites, 
-            'hrrr': [0.]*n_sites, 
-            'nam': [0.]*n_sites}
-    std_err = {'mix' : [0.]*n_sites, 
-               'hrrr': [0.]*n_sites, 
-               'nam': [0.]*n_sites}
-    weights = {'const' : [0.]*n_sites, 
-               'hrrr': [0.]*n_sites, 
-               'nam': [0.]*n_sites}
+    paths = sorted(paths)
 
+    n_sites = len(paths)
+    
+    error = {}; std_err = {}; weights = {}
+    for mod in models:
+        error[mod] = numpy.array([0.]*n_sites) 
+        std_err[mod] = numpy.array([0.]*n_sites)
+    weights['hrrr'] = numpy.array([0.]*n_sites)
+    weights['nam'] = numpy.array([0.]*n_sites)
+    weights['const'] = numpy.array([0.]*n_sites)
 
     for i,p in enumerate(paths):
         
@@ -34,38 +64,57 @@ def main(
         meas = df['irrMe%s' % to_predict]    
         hrrr = df['irrMoOp1_%s' % to_predict]    
         nam = df['irrMoOp2_%s' % to_predict]
-    
-        # find the first data point after hold out day
-        may_ind = numpy.where(df['month']==hold_out[0])[0][0]
-        day_ind = numpy.where(df['day']==hold_out[1])[0]
-        ind = day_ind[numpy.where(day_ind > may_ind)[0][0]]
         
-        A = numpy.vstack([hrrr, nam]).T
-        if abs_diff:
-            A = numpy.hstack([A, numpy.abs(nam - hrrr)[:,None]])
-        if center:
-            A = numpy.hstack([A, numpy.ones((A.shape[0],1))])
+        n_samples = len(meas)
+            
+            
+        if (hold_out is None) & (n_folds > 0):
+            s_err = dict(zip(models, numpy.zeros(len(models))))
+            err = dict(zip(models, numpy.zeros(len(models))))
+            wt = None
+            for f in xrange(n_folds):
+                
+                #print 'fold:; ', f
 
-        meas = {'train': meas[:ind], 'test': meas[ind:]} 
-        hrrr = {'train': hrrr[:ind], 'test': hrrr[ind:]} # need hrrr/nam training?
-        nam = {'train': nam[:ind], 'test': nam[ind:]} 
-        A  = {'train': A[:ind], 'test': A[ind:]} 
-    
-        C = numpy.dot(A['train'].T, A['train']) + l2reg * numpy.eye(A['train'].shape[1])
-        b = numpy.dot(A['train'].T, meas['train'])
-        w = numpy.linalg.solve(C, b)
+                ind_a = numpy.round(n_samples*f / float(n_folds)).astype(int)
+                ind_b = numpy.round(n_samples*(f+1) / float(n_folds)).astype(int)
+                mask = numpy.array([True]*n_samples)
+                mask[ind_a:ind_b] = False
+                w, er, se = train_model(meas, hrrr, nam, mask, l2reg, center, abs_diff)
+                wt = w if wt is None else wt+w
+                for k in er.keys():  # sum over folds
+                    err[k] += er[k]
+                    s_err[k] += se[k]
 
-        weights['hrrr'][i] = w[0]
-        weights['nam'][i] = w[1]
-        weights['const'][i] = w[-1]
+                #print 'fold %i error: %f' % (f, er['mix'])
+                #print 'fold %i std error: %f' % (f, se['mix'])
+                #print 'weights: ', w
+
+            wt = wt / float(n_folds)
+            for k in er.keys():  # average over folds
+                err[k] = err[k] / float(n_folds)
+                s_err[k] = s_err[k] / (float(n_folds) * numpy.sqrt(n_folds))
+                
+        elif (n_folds is None) & (len(hold_out) == 2):
+            # find the first data point after hold out day
+            mon_ind = numpy.where(df['month']==hold_out[0])[0][0]
+            day_ind = numpy.where(df['day']==hold_out[1])[0]
+            ind = day_ind[numpy.where(day_ind > mon_ind)[0][0]]
+            mask = numpy.array([True]*n_samples)
+            mask[ind:] = False
+            wt, err, s_err = train_model(meas, hrrr, nam, mask, l2reg, center, abs_diff)
+        else: 
+            print 'n_folds or hold_out date must be set and the other None'
+            assert false
         
-        sq_err = {'mix': (meas['test'] - numpy.dot(A['test'],w))**2,
-                  'hrrr': (meas['test'] - hrrr['test'])**2,
-                  'nam': (meas['test'] - nam['test'])**2}
+        weights['hrrr'][i] = wt[0]
+        weights['nam'][i] = wt[1]
+        weights['const'][i] = wt[-1]
+        for k in error.keys():
+            error[k][i] = err[k]
+            std_err[k][i] = s_err[k]
 
-        for mod in ['mix', 'hrrr', 'nam']:
-            error[mod][i] = numpy.sqrt(numpy.mean(sq_err[mod]))
-            std_err[mod][i] = numpy.sqrt(numpy.std(sq_err[mod])) / numpy.sqrt(len(sq_err[mod]))
+
 
         # get per-day error?
         
@@ -99,9 +148,11 @@ def main(
         site_codes = ['bon','tbl','dra','fpk','gwn','psu','sxf','abq','bis','hxn','msn','sea','slc','ste']
         pyplot.xticks(ind, site_codes, size = 25, fontweight='bold')
         pyplot.ylabel('RMSE $(W/m^2)$', size = 20, fontweight='bold')
-        pyplot.suptitle('%s Irradiance Forecast Error by Site' % to_predict, fontsize = 30, fontweight='bold')
+        pyplot.suptitle('%s Irradiance %s Error by Site' % 
+                (to_predict, 'Forecast' if n_folds is None else 'Crossval'), 
+                fontsize = 30, fontweight='bold')
         ax.autoscale(tight=False)
-        pyplot.savefig('plots/site_error_%s.pdf' % to_predict.replace(' ',''))
+        pyplot.savefig('plots/site_error_%s-%s.pdf' % (to_predict.replace(' ',''),'Forecast' if n_folds is None else 'Crossval'))
 
         # plot learned weights by site
         pyplot.clf()
@@ -111,21 +162,47 @@ def main(
         pyplot.legend(['HRRR', 'NAM'], fontsize = 20, loc=2)
         pyplot.xticks(ind, ['']*14, size = 25)
         pyplot.ylabel('Regression Weight', size = 20, fontweight='bold')
-        pyplot.suptitle('Linear Regression Weights by Site - %s' % to_predict, fontsize = 30, fontweight='bold')
+        pyplot.suptitle('%s Linear Regression Weights by Site - %s' % 
+                    ('Forecast' if n_folds is None else 'Crossval', to_predict),
+                    fontsize = 30, fontweight='bold')
         ax.autoscale(tight=False)
 
         ax = pyplot.subplot(212)
-        #ax.bar(ind-0.2, weights['hrrr'], width=0.2, color='b', align='center')
-        #ax.bar(ind, weights['nam'], width=0.2, color='r', align='center')
         ax.bar(ind, weights['const'], width=0.2, color='k', align='center')
         pyplot.legend(['Const'], fontsize = 20,  loc=0)
         pyplot.xticks(ind, site_codes, size = 25, fontweight='bold')
         pyplot.ylabel('Irradiance $(W/m^2)$', size = 20, fontweight='bold')
-        #pyplot.title('Constant Bias by Site', fontsize = 30)
         ax.autoscale(tight=False)
-        pyplot.savefig('plots/site_weights_%s.pdf' % to_predict.replace(' ',''))
+        pyplot.savefig('plots/site_weights_%s-%s.pdf' % \
+            (to_predict.replace(' ',''),'Forecast' if n_folds is None else 'Crossval'))
 
+def train_model(meas, hrrr, nam, mask, l2reg = 0., center = True, abs_diff = False):
 
+    A = numpy.vstack([hrrr, nam]).T
+    if abs_diff:
+        A = numpy.hstack([A, numpy.abs(nam - hrrr)[:,None]])
+    if center:
+        A = numpy.hstack([A, numpy.ones((A.shape[0],1))])
+    not_mask = numpy.array(map(lambda x: not x, mask))
+    meas = {'train': meas[mask], 'test': meas[not_mask]} 
+    hrrr = {'train': hrrr[mask], 'test': hrrr[not_mask]} # need hrrr/nam training?
+    nam = {'train': nam[mask], 'test': nam[not_mask]} 
+    A  = {'train': A[mask,:], 'test': A[not_mask,:]} 
+
+    C = numpy.dot(A['train'].T, A['train']) + l2reg * numpy.eye(A['train'].shape[1])
+    b = numpy.dot(A['train'].T, meas['train'])
+    w = numpy.linalg.solve(C, b)
+   
+    sq_err = {'mix': (meas['test'] - numpy.dot(A['test'],w))**2,
+              'hrrr': (meas['test'] - hrrr['test'])**2,
+              'nam': (meas['test'] - nam['test'])**2}
+    
+    error = {}; std_err = {};
+    for mod in ['mix', 'hrrr', 'nam']:
+        error[mod] = numpy.sqrt(numpy.mean(sq_err[mod]))
+        std_err[mod] = numpy.sqrt(numpy.std(sq_err[mod])) / numpy.sqrt(len(sq_err[mod]))
+
+    return w, error, std_err    
 
 def split_mixture(
     threshold = [20.],
