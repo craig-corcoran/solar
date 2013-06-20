@@ -6,31 +6,45 @@ from matplotlib import pyplot
 
 class MixtureModel(object):
     
-    def __init__(self, target, A, mask, l2reg = 0., center = True):
+    def __init__(self, A, target, mask, l2reg = 0., center = True):
         
-        self.A = A
-        if center:
-            self.A = numpy.hstack([A, numpy.ones((A.shape[0],1))])
+        self.centered = center
+        if center: # append constant column
+            A = numpy.hstack([A, numpy.ones((A.shape[0],1))])
+
         not_mask = numpy.array(map(lambda x: not x, mask))
-        meas = {'train': meas[mask], 'test': meas[not_mask]} 
-        hrrr = {'train': hrrr[mask], 'test': hrrr[not_mask]} # need hrrr/nam training?
-        nam = {'train': nam[mask], 'test': nam[not_mask]} 
-        A  = {'train': A[mask,:], 'test': A[not_mask,:]} 
+        self.target = {'train': target[mask], 'test': target[not_mask]} 
+        self.A  = {'train': A[mask,:], 'test': A[not_mask,:]} 
 
         C = numpy.dot(A['train'].T, A['train']) + l2reg * numpy.eye(A['train'].shape[1])
         b = numpy.dot(A['train'].T, meas['train'])
-        w = numpy.linalg.solve(C, b)
-       
-        sq_err = {'mix': (meas['test'] - numpy.dot(A['test'],w))**2,
-                  'hrrr': (meas['test'] - hrrr['test'])**2,
-                  'nam': (meas['test'] - nam['test'])**2}
+        self.w = numpy.linalg.solve(C, b)
+
+    def model_errors(self):
+        ''' returns dictionaries with the test and training RMSE and standard 
+        error for each column in A, which assumes each column is a model trying 
+        to predict the target values
+        '''
+        mn_err = {}; std_err = {}
+        for dset in ['train', 'test']:
+            err = (self.A[dset] - self.target[dset])**2
+            if self.center:
+                err = err[:, :-1]
+            mn_err[dset] = numpy.sqrt(numpy.mean(err, axis = 0))
+            std_err[dset] = numpy.sqrt(numpy.std(err, axis = 0)) / numpy.sqrt(len(self.target[dset]))
+        return mn_err, std_err
+    
+    def mixture_errors(self):
+        ''' returns dictionaries with the test and training RMSE and standard 
+        error for the mixture using the learned weights w.
+        '''
+        mn_err = {}; std_err = {}
+        for dset in ['train', 'test']:
+            err = (numpy.dot(self.A[dset], self.w) - self.target[dset])**2
+            mn_err[dset] = numpy.sqrt(numpy.mean(err, axis = 0))
+            std_err[dset] = numpy.sqrt(numpy.std(err, axis = 0)) / numpy.sqrt(len(self.target[dset]))
+        return mn_err, std_err
         
-        error = {}; std_err = {};
-        for mod in ['mix', 'hrrr', 'nam']:
-            error[mod] = numpy.sqrt(numpy.mean(sq_err[mod]))
-            std_err[mod] = numpy.sqrt(numpy.std(sq_err[mod])) / numpy.sqrt(len(sq_err[mod]))
-
-
 
 def main(
     path_root = 'data/prediction/',
@@ -39,23 +53,20 @@ def main(
     hold_out = None, #(5,16),
     n_folds = 10,
     center = True,
-    abs_diff = False,
     plot = True, 
     models = ['mix','hrrr','nam']):
 
     paths = glob.glob(path_root + '/*.csv')
-
     paths = sorted(paths)
-
     n_sites = len(paths)
+    n_params = len(models) + (1 if center else 0)
     
-    error = {}; std_err = {}; weights = {}
+    error = {}; std_err = {};
     for mod in models:
-        error[mod] = numpy.array([0.]*n_sites) 
-        std_err[mod] = numpy.array([0.]*n_sites)
-    weights['hrrr'] = numpy.array([0.]*n_sites)
-    weights['nam'] = numpy.array([0.]*n_sites)
-    weights['const'] = numpy.array([0.]*n_sites)
+        error[mod] = numpy.zeros(n_sites) 
+        std_err[mod] = numpy.zeos(n_sites)
+    weights = numpy.zeros((n_sites, n_params))
+    n_samples = numpy.zeros(n_sites)
 
     for i,p in enumerate(paths):
         
@@ -64,6 +75,7 @@ def main(
         meas = df['irrMe%s' % to_predict]    
         hrrr = df['irrMoOp1_%s' % to_predict]    
         nam = df['irrMoOp2_%s' % to_predict]
+        A = numpy.vstack([hrrr, nam]).T
         
         n_samples = len(meas)
             
@@ -102,6 +114,9 @@ def main(
             ind = day_ind[numpy.where(day_ind > mon_ind)[0][0]]
             mask = numpy.array([True]*n_samples)
             mask[ind:] = False
+
+            m = MixtureModel(A, meas, mask, l2reg, center)
+            # XXX
             wt, err, s_err = train_model(meas, hrrr, nam, mask, l2reg, center, abs_diff)
         else: 
             print 'n_folds or hold_out date must be set and the other None'
