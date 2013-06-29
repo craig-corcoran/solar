@@ -17,7 +17,9 @@ class MixtureModel(object):
         self.A  = {'train': A[mask,:], 'test': A[not_mask,:]} 
         
         self.l2reg = l2reg
-        C = numpy.dot(self.A['train'].T, self.A['train']) + l2reg * numpy.eye(self.n_params)
+        reg_matrix = self.l2reg * numpy.eye(self.n_params)
+        reg_matrix[-1,-1] = 0.
+        C = numpy.dot(self.A['train'].T, self.A['train']) + reg_matrix
         b = numpy.dot(self.A['train'].T, self.target['train'])
         self.w = numpy.linalg.solve(C, b)
 
@@ -86,97 +88,16 @@ class MixtureData(object):
             assert len(vals) == len(self.columns)
             self.add_row(vals)
 
-def plot_average(d_avg_error, d_avg_stder, title, keys, width = 0.1,
-                ind = None, sp_num = None, colors = None):
-
-    sp_num = sp_num if sp_num else 111 
-    ind = ind if ind else 1
-    colors = colors if colors else ['b','g','r','c','m','y']
-
-    
-    ax = pyplot.subplot(sp_num)
-    
-    n_mods = len(d_avg_error.keys())
-    offset = -width * (n_mods / 2)
-    for i, mod in enumerate(keys):
-        ax.bar(ind + offset + (width*i), 
-            d_avg_error[mod], 
-            width = width / 2.,  
-            align = 'center', 
-            yerr = d_avg_stder[mod], 
-            ecolor = 'k', 
-            color = colors[i % len(colors)])
-    ax.autoscale(tight=False)
-    pyplot.xticks([])
-    pyplot.box(on = False)
-    pyplot.title(title, fontsize = 20, va='top')
-
-
-def main(models = ['max_diurnal', 'mean_diurnal', 'rap', 'hrrr', 'nam'],
-        col_names = ['Max Diurnal Forecast','Mean Diurnal Forecast',
-                    'RAP Forecast', 'HRRR Forecast','NAM Forecast','Actual']):
-    
-    # arm crossval experiment
-    print 'performing crossval experiment on ARM data'
-    d_avg_error, d_avg_stder, \
-    d_site_error, d_site_stder = mixture_experiment(
-                regex = 'data/prediction/arm-5mixture.csv',
-                n_folds = 10,
-                models = models, 
-                col_names = col_names)
-
-    for i,dset in enumerate(['train','test']):
-        title = 'Crossvalidation - %s' % dset
-        keys = numpy.array(d_avg_error.keys())
-        keys = keys[numpy.array([dset in k for k in keys])]
-        keys = sorted(keys)
-        subplot_num = 321 + i
-        plot_average(d_avg_error, d_avg_stder, title, keys, sp_num = subplot_num)
-        
-        legend_names = map(lambda x: x.replace('_',' '), keys)
-        pyplot.legend(legend_names, loc=2)
-    
-
-    # arm forecast experiment
-    print 'performing forecast experiment on ARM data'
-    hold_outs = [(5,16), (6,1)]
-    for j, h in enumerate(hold_outs):
-        d_avg_error, d_avg_stder, \
-        d_site_error, d_site_stder = mixture_experiment(
-                    regex = 'data/prediction/arm-5mixture.csv',
-                    n_folds = None,
-                    hold_out = h,
-                    models = models, 
-                    col_names = col_names) 
-        
-        for i,dset in enumerate(['train','test']):
-            title = 'Forecast %s onward - %s' % (str(h).replace('(','').replace(')','').replace(',','/').replace(' ',''), dset)
-            keys = numpy.array(d_avg_error.keys())
-            keys = keys[numpy.array([dset in k for k in keys])]
-            keys = sorted(keys)
-            subplot_num = 323 + j*2 + i
-            plot_average(d_avg_error, d_avg_stder, title, keys, sp_num = subplot_num)
-
-            #legend_names = map(lambda x: x.replace('_',' '), keys)
-            #pyplot.legend(legend_names, loc=2)
-    
-    suptitle = 'ARM 5 Model Mixture Error'
-    pyplot.suptitle(suptitle, fontsize = 20)
-    pyplot.savefig('plots/%s.pdf' % suptitle.replace(' ', '_').lower())
-
-    # XXX plot weights
-
-
 def mixture_experiment(
-    regex = 'data/prediction/arm-5mixture.csv', # 'data/prediction/20130606/*.csv',
+    regex = 'data/prediction/arm-6mixture.csv', # 'data/prediction/20130606/*.csv',
     to_predict = None, #'Total', #'Diff',# 'DirNorm', #
     l2reg = 0., 
     hold_out = None, # (6,1), # (5,16), #
     n_folds = 10, # None, # 
     center = True,
-    models = ['max_diurnal', 'mean_diurnal', 'rap', 'hrrr', 'nam'], #['hrrr','nam'],
-    col_names = ['Max Diurnal Forecast','Mean Diurnal Forecast','RAP Forecast',
-                'HRRR Forecast','NAM Forecast','Actual']): #['irrMoOp1_', 'irrMoOp2_','irrMe']):
+    models = ['eulerian', 'max_diurnal', 'mean_diurnal', 'rap', 'hrrr', 'nam'],
+    col_names = ['Eulerian', 'Max Diurnal Forecast','Mean Diurnal Forecast','RAP Forecast',
+                'HRRR Forecast','NAM Forecast','Actual']): 
     
     # last column name is target/measured
     assert len(col_names) == (len(models) + 1)
@@ -188,12 +109,23 @@ def mixture_experiment(
     paths = sorted(paths)
     
     err_data = MixtureData()
+    avg_weight = None
 
     for i,p in enumerate(paths):
         
         print 'file: ', p
+        print 'reg: ', l2reg
+    
 
         df = pandas.read_csv(p)
+        print 'pre processing frame: ', df
+
+        for col in col_names:
+            dat = df[col]
+            if sum(dat.notnull()) < len(dat):
+                df = df.ix[dat.notnull()]
+
+        print 'post processing', df
 
         d_columns = {'meas': df[col_names[-1]]}
         for i,mod in enumerate(models):
@@ -210,12 +142,13 @@ def mixture_experiment(
                 ind_b = numpy.round(n_samp*(f+1) / float(n_folds)).astype(int)
                 mask = numpy.array([True]*n_samp)
                 mask[ind_a:ind_b] = False
-                
                 n_samp_tup = (n_samp-sum(mask), sum(mask))
-                
-                # build model, measure errors
+
                 m = MixtureModel(A, d_columns['meas'], mask, l2reg, center)
                 err_data.record_errors(m, f, n_samp_tup, i, models)
+                avg_weight = m.w if avg_weight is None else avg_weight + m.w
+
+                print m.w
                 
                 
         elif (n_folds is None) & (len(hold_out) == 2):
@@ -223,6 +156,8 @@ def mixture_experiment(
             # find the first data point after hold out day
             mon_ind = numpy.where(df['month']==hold_out[0])[0][0]
             day_ind = numpy.where(df['day']==hold_out[1])[0]
+            
+            print 'days index: ', numpy.where(day_ind > mon_ind)
             ind = day_ind[numpy.where(day_ind > mon_ind)[0][0]]
             mask = numpy.array([True]*n_samp)
             mask[ind:] = False
@@ -230,14 +165,19 @@ def mixture_experiment(
 
             m = MixtureModel(A, d_columns['meas'], mask, l2reg, center)
             err_data.record_errors(m, 1, n_samp_tup, i, models)
+            avg_weight = m.w if avg_weight is None else avg_weight + m.w
+
+            print m.w
             
         else: 
             print 'n_folds or hold_out date must be set and the other None'
             assert False
             
-    err_data.df.to_csv('%s-error.csv' % regex.split('.')[0])
-
     nf = n_folds if n_folds else 1.
+    avg_weight = avg_weight / (len(paths) * nf)
+    
+    # write error data to file
+    #err_data.df.to_csv('%s-error.csv' % regex.split('.')[0])
 
     # aggregate data for each model, site pair
     gb = err_data.df.groupby(['model', 'site_index'])
@@ -261,66 +201,132 @@ def mixture_experiment(
             d_avg_error[mod + ds] = (mn_err * mn_samps).sum() / mn_samps.sum()
             d_avg_stder[mod + ds] = (mn_stder * mn_samps).sum() / mn_samps.sum()
 
-        print 'mean %s test error: ' % mod,  d_avg_error[mod + '-test']
-        print 'mean %s test standard error: ' % mod,  d_avg_stder[mod + '-test']
+        print '%s test error: ' % mod,  d_avg_error[mod + '-test']
+        print '%s test standard error: ' % mod,  d_avg_stder[mod + '-test']
 
-    return d_avg_error, d_avg_stder, d_site_error, d_site_stder
+    return d_avg_error, d_avg_stder, d_site_error, d_site_stder, avg_weight
 
+def plot_bars(d_bar, d_err, title, keys, width = 0.1,
+                ind = None, sp_num = None, colors = None):
 
-    # plotting
+    sp_num = sp_num if sp_num else 111 
+    ind = ind if ind else 1
+    colors = colors if colors else ['b','g','r','c','m','y']
+
+    ax = pyplot.subplot(sp_num)
     
+    n_mods = len(keys)
+    offset = -width * (n_mods / 2)
+    for i, mod in enumerate(keys):
+        ax.bar(ind + offset + (width*i), 
+            d_bar[mod], 
+            width = width / 2.,  
+            align = 'center', 
+            yerr = d_err[mod] if d_err else None, 
+            ecolor = 'k', 
+            color = colors[i % len(colors)])
+    #ax.autoscale(tight=False)
+    pyplot.xticks([])
+    pyplot.box(on = False)
+    pyplot.title(title, fontsize = 20, va='top')
+
+    return ax
+
+def main(path_regex = 'data/prediction/arm-6mixture.csv',
+        models = ['eulerian', 'max_diurnal', 'mean_diurnal', 'rap', 'hrrr', 'nam'],
+        col_names = ['Eulerian', 'Max Diurnal Forecast','Mean Diurnal Forecast',
+                 'RAP Forecast', 'HRRR Forecast','NAM Forecast','Actual'],
+        forecast = False,
+        l2reg = 100000.,
+        suptitle = 'ARM 6 Model Mixture'):
+    
+    # arm crossval experiment
+    print 'performing crossval experiment on ARM data'
+    d_avg_error, d_avg_stder, \
+    d_site_error, d_site_stder, \
+    avg_weight_cv = mixture_experiment(
+                regex = path_regex,
+                n_folds = 10,
+                models = models, 
+                col_names = col_names,
+                l2reg = l2reg)
+    pyplot.clf()
+
+    for i,dset in enumerate(['train','test']):
+        title = 'Crossvalidation - %s' % dset
+        keys = numpy.array(d_avg_error.keys())
+        keys = keys[numpy.array([dset in k for k in keys])]
+        keys = sorted(keys)
+        subplot_num = 321 + i if forecast else 121 + i
+        plot_bars(d_avg_error, d_avg_stder, title, keys, sp_num = subplot_num)
         
+        legend_names = map(lambda x: x.replace('_',' '), keys)
+        pyplot.legend(legend_names, loc=2)
+    
 
-    # get per-day error?
+    # arm forecast experiments
+    if forecast:
+        print 'performing forecast experiment on ARM data'
+        hold_outs = [(5,16), (6,1)]
+        avg_weight_fc = [None]*len(hold_outs)
+        for j, h in enumerate(hold_outs):
+            d_avg_error, d_avg_stder, \
+            d_site_error, d_site_stder, \
+            avg_weight_fc[j] = mixture_experiment(
+                        regex = path_regex,
+                        n_folds = None,
+                        hold_out = h,
+                        models = models, 
+                        col_names = col_names,
+                        l2reg = l2reg) 
 
-    # plotting
+            for i,dset in enumerate(['train','test']):
+                title = 'Forecast %s onward - %s' % (str(h).replace('(','').replace(')','').replace(',','/').replace(' ',''), dset)
+                keys = numpy.array(d_avg_error.keys())
+                keys = keys[numpy.array([dset in k for k in keys])]
+                keys = sorted(keys)
+                subplot_num = 323 + j*2 + i
+                plot_bars(d_avg_error, d_avg_stder, title, keys, sp_num = subplot_num)
 
-    #if plot:
-
-        #if to_predict is 'Diff':
-            #to_predict = 'Diffuse'
-        #elif to_predict is 'DirNorm':
-            #to_predict = 'Direct Normal'
-
-        #ind = numpy.arange(n_sites)
+                #legend_names = map(lambda x: x.replace('_',' '), keys)
+                #pyplot.legend(legend_names, loc=2)
         
-        ## plot errors by site
-        #pyplot.clf()
-        #ax = pyplot.subplot(111)
-        #ax.bar(ind-0.2, d_site_error['mix'], width=0.2, color='g', align='center', yerr=d_site_stder['mix'], ecolor='k')
-        #ax.bar(ind, d_site_error['hrrr'], width=0.2, color='b', align='center', yerr=d_site_stder['hrrr'], ecolor='k')
-        #ax.bar(ind+0.2, d_site_error['nam'], width=0.2, color='r', align='center', yerr=d_site_stder['nam'], ecolor='k')
-        #pyplot.legend(['LR Mixture', 'HRRR', 'NAM'], fontsize = 20, loc=2)
-        #site_codes = ['bon','tbl','dra','fpk','gwn','psu','sxf','abq','bis','hxn','msn','sea','slc','ste']
-        #pyplot.xticks(ind, site_codes, size = 25, fontweight='bold')
-        #pyplot.ylabel('RMSE $(W/m^2)$', size = 20, fontweight='bold')
-        #pyplot.suptitle('%s Irradiance %s Error by Site' % 
-                #(to_predict, 'Forecast' if n_folds is None else 'Crossval'), 
-                #fontsize = 30, fontweight='bold')
-        #ax.autoscale(tight=False)
-        #pyplot.savefig('plots/site_error_%s-%s.pdf' % (to_predict.replace(' ',''),'Forecast' if n_folds is None else 'Crossval'))
+    pyplot.suptitle(suptitle + ' Error', fontsize = 20)
+    pyplot.savefig('plots/%s_error.reg=%s.pdf' % (suptitle.replace(' ', '_').lower(), str(l2reg)))
+    
+    # plot crossval weights    
+    pyplot.clf()
+    d_weights = dict(zip(models, avg_weight_cv[:-1]))
+    keys = sorted(models)
+    title = 'Average Crossvalidation Weights' 
+    sp_num = 131 if forecast else 111
+    ax_cv = plot_bars(d_weights, None, title, keys, sp_num = sp_num)
 
-        ## plot learned weights by site
-        #pyplot.clf()
-        #ax = pyplot.subplot(211)
-        #ax.bar(ind-0.1, weights['hrrr'], width=0.2, color='b', align='center')
-        #ax.bar(ind+0.1, weights['nam'], width=0.2, color='r', align='center')
-        #pyplot.legend(['HRRR', 'NAM'], fontsize = 20, loc=2)
-        #pyplot.xticks(ind, ['']*14, size = 25)
-        #pyplot.ylabel('Regression Weight', size = 20, fontweight='bold')
-        #pyplot.suptitle('%s Linear Regression Weights by Site - %s' % 
-                    #('Forecast' if n_folds is None else 'Crossval', to_predict),
-                    #fontsize = 30, fontweight='bold')
-        #ax.autoscale(tight=False)
+    ymin, ymax = pyplot.ylim()
+    
+    legend_names = map(lambda x: x.replace('_',' '), keys)
+    pyplot.legend(legend_names, fontsize=20, loc = 4)
 
-        #ax = pyplot.subplot(212)
-        #ax.bar(ind, weights['const'], width=0.2, color='k', align='center')
-        #pyplot.legend(['Const'], fontsize = 20,  loc=0)
-        #pyplot.xticks(ind, site_codes, size = 25, fontweight='bold')
-        #pyplot.ylabel('Irradiance $(W/m^2)$', size = 20, fontweight='bold')
-        #ax.autoscale(tight=False)
-        #pyplot.savefig('plots/site_weights_%s-%s.pdf' % \
-            #(to_predict.replace(' ',''),'Forecast' if n_folds is None else 'Crossval'))
+    
+    if forecast:
+        # plot forecast weights    
+        axes = [None] * len(hold_outs)
+        axes.append(ax_cv)
+        for j, h in enumerate(hold_outs):
+            d_weights = dict(zip(models, avg_weight_fc[j][:-1]))
+            title = 'Forecast Weights - %s onward' % str(h).replace('(','').replace(')','').replace(',','/').replace(' ','')
+            axes[j] = plot_bars(d_weights, None, title, sorted(models), sp_num = 132 + j)
+
+            ymin_fc, ymax_fc = pyplot.ylim()
+            ymin = min(ymin, ymin_fc)
+            ymax = max(ymax, ymax_fc)
+            
+        for a in axes:
+            lims = a.axis()
+            a.axis([lims[0], lims[1], ymin, ymax])
+
+    pyplot.suptitle(suptitle + ' Weights', fontsize = 20)
+    pyplot.savefig('plots/%s_weights.reg=%s.pdf' % (suptitle.replace(' ', '_').lower(), str(l2reg)))
 
     
 if __name__ == '__main__':
