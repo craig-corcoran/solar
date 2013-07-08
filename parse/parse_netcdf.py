@@ -11,8 +11,9 @@ from sklearn.preprocessing import Scaler
 
 
 # XXX whats the difference between missing and mask?
-
-
+# XXX separate into samples 
+# XXX serialize samples or frames
+# XXX store non-spatial parameters separately?
 # XXX weight outliers lower during interpolation
 
 class GoesData(object):
@@ -54,7 +55,8 @@ class GoesData(object):
 
     def rescale(self):
         '''rescale by units in metadata, center and set variance to unity, 
-        creates scaler (for applying the same scaling or un-scaling later) '''
+        stores mean and std for applying the same scaling or un-scaling later) 
+        '''
 
         # convert lat to 0 to pi and lon to 0 to 2pi
         self.frame['lat_rad'], self.frame['lon_rad'] = self.latlon_to_thetaphi(
@@ -279,133 +281,6 @@ def main(
             ax.set_ylim(ylim)
             pyplot.savefig('sphere_spline_interp-%s-%i.pdf' % (inp, i))
 
-    assert False
-    
-    # scale data using range_min and range_max
-    # normalize (center and set var to 1) -> scikit-learn
-
-    # for each time slice, for each input, iterpolate spatially
-    # store interpolated data?
-    # sample receptive field on uniform grid, store samples
-
-
-    
-   
-
-
-    #grouped = frame.groupby(['lat_cell','lon_cell', 'img_date', 'img_time'])
-    #mean_data = grouped.mean()
-    #print len(mean_data)
-    #print len(frame)
-    #for inp in inputs:
-
-        #print 'creating spherical spline representation'
-        #print numpy.max(frame['lat_cell'].values * (numpy.pi/180.))
-        #print numpy.max(frame['lon_cell'].values * (numpy.pi/180.))
-        #print numpy.max(frame[inp].values) 
-
-        #print frame['lat_cell'].values.shape
-        #print frame['lon_cell'].values.shape
-        #print frame[inp].values.shape
-
-        #no_missing = frame.dropna(how='any', subset=[inp])
-        ##bispline = interpolate.SmoothSphereBivariateSpline(
-                                    ##numpy.linspace(0, numpy.pi, 10),
-                                    ##numpy.linspace(0, numpy.pi*2, 10),
-                                    ##numpy.random.random(10), 
-                                    ##s = 10)
-
-        #bispline = interpolate.SmoothSphereBivariateSpline(
-                                #no_missing['lat_cell'].values*(numpy.pi/180.),
-                                #no_missing['lon_cell'].values*(numpy.pi/180.),
-                                #no_missing[inp].values,
-                                #s=len(no_missing)) 
-        #print bispline
-
-   
-    
-    # index lat and lon according to range and dlat, dlon
-    x = frame['lat_cell']
-    y = frame['lon_cell']
-    indx = numpy.vstack([x - pos_extrema['min'][0],y - pos_extrema['min'][1]])
-    indx = numpy.floor(indx / dlatlon[:,None]).astype(int)
-    frame['lat_index'] = indx[0]
-    frame['lon_index'] = indx[1]
-    
-    #print 'plotting density histogram'
-    #pyplot.clf()
-    #pyplot.hexbin(x, y)
-    #pyplot.savefig('plots/satellite/density.pdf')
-    
-    # average over lat,lon and time groups
-    grouped = frame.groupby(['lat_index','lon_index', 'img_date', 'img_time'])
-    mean_data = grouped.mean()
-    
-    print 'len before dropping na from gridded frame: ', len(mean_data)
-    mean_data.dropna(how='any', subset=inputs)
-    print 'len after dropping na from gridded frame: ', len(mean_data)
-    mean_data = mean_data.reset_index()
-    mean_data['datetime'] = convert_to_datetime(mean_data['img_date'].values,
-                                                mean_data['img_time'].values)
-    mean_data = mean_data.sort('datetime')
-
-    # convert to datetime 
-    #float_time = mean_data['datetime'].values.astype(float)
-    #assert (float_time == sorted(float_time)).all()
-    #dtime = float_time[1:] - float_time[:-1]
-    #dtime = dtime[dtime > 0]
-    #dtime = numpy.min(dtime)
-
-    max_pos_indx = numpy.max(indx, axis = 1)
-    size_x = max_pos_indx[0]+1
-    size_y = max_pos_indx[1]+1
-    lat_grid, lon_grid = numpy.mgrid[0:size_x, 0:size_y]
-
-    # for each time slice, interpolate spatially
-    for i, time in enumerate(sorted(set(mean_data['datetime']))):
-        
-        print 'time slice month, day, hr, min: ', time.month, time.day, time.hour, time.minute
-
-        time_slice = mean_data[mean_data['datetime'] == time]
-
-        points = map(lambda x: x[:,None], [time_slice['lat_index'].values, 
-                                            time_slice['lon_index'].values])
-        points = numpy.hstack(points)
-        n_samp = points.shape[0]
-        print 'number of grid cells: ', n_samp
-        print 'grid size: ', lat_grid.shape
-        
-        interp_data = numpy.empty((size_x, size_y, len(inputs)), dtype = 'float')
-        interp_data[:] = numpy.nan
-        for j, inp in enumerate(inputs):
-
-            print 'input: ', inp
-            # spatially interpolate over the input channel
-            
-            spline_rep = interpolate.bisplrep(points[0,:], points[1,:], 
-                                time_slice[inp].values.astype(float), 
-                                s=n_samp + numpy.sqrt(2*n_samp)) # upper bound on s given in spline docs
-            z_grid = interpolate.bisplev(lat_grid, lon_grid, spline_rep)
-            # z_grid = griddata(points, time_slice[inp].values.astype(float), (lat_grid, lon_grid), method=interp_method)
-            interp_data[:,:,j] = z_grid # XXX plot new interpolated data
-            
-            n_non_null = z_grid.shape[0] * z_grid.shape[1] - numpy.sum(numpy.isnan(z_grid))
-            print 'number non null after interpolation: ', n_non_null
-            print 'total numer of grid cells: ', size_x * size_y
-
-        occup_grid = numpy.zeros(z_grid.shape, dtype = 'bool')
-        occup_grid[points[:,0], points[:,1]] = True
-        samples, samp_indxs = split_into_samples(occup_grid, interp_data, 
-                                        dens_thresh = 0.5, samp_size = (10, 10)) # xxx set as input
-
-            
-            #if n_non_null > 0:
-                #pyplot.clf()
-                #pyplot.scatter(lat_grid.flatten(), lon_grid.flatten(), c = z_grid.flatten(), s=80, cmap='jet')
-                #pyplot.savefig('plots/satellite/%s-%i-postinterp-%s.png' % (inp, i, interp_method))
-
-            #pyplot.savefig(
-            #pyplot.savefig('plots/satellite/ch2%i.png' % i)
 
 def split_into_samples(pre_grid, post_grid, dens_thresh = 0.5, samp_size = (10, 10)):
     
@@ -430,13 +305,6 @@ def split_into_samples(pre_grid, post_grid, dens_thresh = 0.5, samp_size = (10, 
     print 'x and y indices: ', indxs[keep]
     
     return [post_grid[f] for f in filters[keep]], indxs[keep]
-
-
-    # XXX dropna after gridding
-    # XXX interpolate/extrapolate then group/grid? which order?
-    # XXX separate into samples 
-    # XXX serialize samples or frames
-    # XXX store non-spatial parameters separately?
 
 
 if __name__ == '__main__':
