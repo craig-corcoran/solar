@@ -73,13 +73,15 @@ class MixtureData(object):
         er, se = m.mixture_errors()
         er_mod, se_mod = m.model_errors()
         
+        # add mixture error value
         vals = ['mix', fold, m.l2reg,
                 n_samp[0], n_samp[1], 
                 er['test'], er['train'], 
                 se['test'], se['train'], site_ind]
         assert len(vals) == len(self.columns)
         self.add_row(vals)
-
+        
+        # add models error values
         for j, mod in enumerate(models):
             vals = [mod, fold, m.l2reg,
                 n_samp[0], n_samp[1], 
@@ -89,7 +91,7 @@ class MixtureData(object):
             self.add_row(vals)
 
 def mixture_experiment(
-    regex = 'data/prediction/arm-6mixture.csv', # 'data/prediction/20130606/*.csv',
+    regex = 'data/prediction/20130606/*.csv', # 'data/prediction/arm-6mixture.csv', # 
     to_predict = None, #'Total', #'Diff',# 'DirNorm', #
     l2reg = 0., 
     hold_out = None, # (6,1), # (5,16), #
@@ -115,21 +117,20 @@ def mixture_experiment(
         
         print 'file: ', p
         print 'reg: ', l2reg
-    
 
         df = pandas.read_csv(p)
-        print 'pre processing frame: ', df
+        #print 'pre processing frame: ', df
 
         for col in col_names:
             dat = df[col]
             if sum(dat.notnull()) < len(dat):
                 df = df.ix[dat.notnull()]
 
-        print 'post processing', df
+        #print 'post processing', df
 
         d_columns = {'meas': df[col_names[-1]]}
-        for i,mod in enumerate(models):
-            d_columns[mod] = df[col_names[i]]
+        for j,mod in enumerate(models):
+            d_columns[mod] = df[col_names[j]]
         
         # model data matrix
         A = numpy.vstack([d_columns[m] for m in models]).T
@@ -148,7 +149,7 @@ def mixture_experiment(
                 err_data.record_errors(m, f, n_samp_tup, i, models)
                 avg_weight = m.w if avg_weight is None else avg_weight + m.w
 
-                print m.w
+                #print m.w
                 
                 
         elif (n_folds is None) & (len(hold_out) == 2):
@@ -207,13 +208,15 @@ def mixture_experiment(
     return d_avg_error, d_avg_stder, d_site_error, d_site_stder, avg_weight
 
 def plot_bars(d_bar, d_err, title, keys, width = 0.1,
-                ind = None, sp_num = None, colors = None):
-
+                ind = None, sp_num = None, colors = None, share_ax = None):
     sp_num = sp_num if sp_num else 111 
     ind = ind if ind else 1
     colors = colors if colors else ['b','g','r','c','m','y']
-
-    ax = pyplot.subplot(sp_num)
+    
+    if share_ax is None:
+        ax = pyplot.subplot(sp_num)
+    else:
+        ax = pyplot.subplot(sp_num, sharey = share_ax, sharex = share_ax)
     
     n_mods = len(keys)
     offset = -width * (n_mods / 2)
@@ -228,17 +231,72 @@ def plot_bars(d_bar, d_err, title, keys, width = 0.1,
     #ax.autoscale(tight=False)
     pyplot.xticks([])
     pyplot.box(on = False)
-    pyplot.title(title, fontsize = 20, va='top')
+    pyplot.title(title, fontsize = 20, va='baseline')
+    pyplot.legend(keys)
 
     return ax
 
-def main(path_regex = 'data/prediction/arm-6mixture.csv',
+def single_model(path_regex = 'data/prediction/20130606/*.csv', #'data/prediction/arm-6mixture.csv',
+        models = ['hrrr', 'nam'],
+        col_names = ['irrMoOp1_','irrMoOp2_','irrMe'],
+        to_predict = 'Total', # 'Diff' # 'DirNorm' #
+        l2reg = 0., #100000.,
+        suptitle =  'Single Models with Scaling and Bias'):
+        
+        col_names = map(lambda x: x + to_predict, col_names)
+            
+        pyplot.clf()
+        ax = None
+        for i,mod in enumerate(models):
+            
+            keys = [mod+'-test', 'mix-test']
+            
+            print 'performing crossval experiment %s' % mod
+            d_avg_error, d_avg_stder, \
+            d_site_error, d_site_stder, \
+            avg_weight_cv = mixture_experiment(
+                regex = path_regex,
+                n_folds = 10,
+                models = [mod], 
+                col_names = [col_names[i]] + [col_names[-1]],
+                l2reg = l2reg)
+
+            print d_site_error.keys()
+            print d_avg_error.keys()
+
+            sp_num = 131+i
+            if ax is None:
+                ax = plot_bars(d_avg_error, d_avg_stder, mod + ' only', keys, width = 0.2, sp_num = sp_num)
+            else:
+                plot_bars(d_avg_error, d_avg_stder, mod + ' only', keys, width = 0.2, sp_num = sp_num, share_ax = ax)
+
+
+        d_avg_error, d_avg_stder, \
+        d_site_error, d_site_stder, \
+        avg_weight_cv = mixture_experiment(
+                regex = path_regex,
+                n_folds = 10,
+                models = models, 
+                col_names = col_names,
+                l2reg = l2reg)
+        
+        keys = ['mix-test']
+        plot_bars(d_avg_error, d_avg_stder, ', '.join(models) + ' mixture', 
+                    keys, width = 0.2, sp_num = 133, colors = ['g'], share_ax = ax)
+        pyplot.savefig('single-model.pdf')
+            
+        
+
+
+
+
+def main(path_regex = 'data/prediction/20130606/*.csv', #'data/prediction/arm-6mixture.csv',
         models = ['eulerian', 'max_diurnal', 'mean_diurnal', 'rap', 'hrrr', 'nam'],
         col_names = ['Eulerian', 'Max Diurnal Forecast','Mean Diurnal Forecast',
                  'RAP Forecast', 'HRRR Forecast','NAM Forecast','Actual'],
         forecast = False,
         l2reg = 100000.,
-        suptitle = 'ARM 6 Model Mixture'):
+        suptitle =  'ARM 6 Model Mixture'):
     
     # arm crossval experiment
     print 'performing crossval experiment on ARM data'
@@ -330,6 +388,7 @@ def main(path_regex = 'data/prediction/arm-6mixture.csv',
 
     
 if __name__ == '__main__':
-    plac.call(main)
+    #plac.call(main)
+    plac.call(single_model)
 
 
