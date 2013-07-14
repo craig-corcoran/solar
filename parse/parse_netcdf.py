@@ -16,6 +16,8 @@ from scipy import interpolate
 # XXX store non-spatial parameters separately?
 # XXX weight outliers lower during interpolation
 
+
+
 class GoesData(object):
     
     def __init__(self, path_regex, inputs, lat_range = None, lon_range = None, 
@@ -27,6 +29,7 @@ class GoesData(object):
         self.interp_buffer = interp_buffer
 
         paths = glob.glob(path_regex)
+        assert len(paths) > 0
         
         # read netcdf file
         clean_frames = [None]*len(paths)
@@ -78,7 +81,7 @@ class GoesData(object):
         print 'mean: ', numpy.array(self.mean_vec)
         print 'std: ', numpy.array(self.std_vec)
 
-        self.frame[self.inputs] = self.frame[self.inputs].astype(float) - self.mean_vec
+        #self.frame[self.inputs] = self.frame[self.inputs].astype(float) - self.mean_vec # XXX
         #self.frame[self.inputs] = self.frame[self.inputs].astype(float) / self.std_vec
 
     # XXX unscale
@@ -105,17 +108,24 @@ class GoesData(object):
         df = pandas.DataFrame(index = numpy.arange(n_rows))
         meta = pandas.DataFrame()
         
-        keep = self.inputs + ['img_date', 'img_time', 'lat_cell', 'lon_cell']
+        if self.inputs is None:
+            keep = ds.variables.keys() # if no inputs given, keep everything
+        else:
+            keep = self.inputs + ['img_date', 'img_time', 'lat_cell', 'lon_cell']
         
         #print 'NetCDF keys: ', ds.variables.keys()
         for head, var in ds.variables.items():
             # only keep subset of data we care about
             if head in keep:
-            
+                
+
                 data, mask = self._data_from_var(var)
                 if len(data) == 1:
                     data = data.repeat(n_rows)
                 else: 
+                    #print len(data)
+                    #print data.shape
+                    #print n_rows
                     assert len(data) == n_rows 
                 
                 # set missing values to nan
@@ -127,7 +137,8 @@ class GoesData(object):
                     # set masked values to nan
                     if mask is not None: 
                         data[mask] = numpy.nan
-
+                
+                #print var.__dict__
                 df[head] = data # add column to data frame
                 
                 # collect meta data for variable
@@ -179,10 +190,10 @@ class GoesData(object):
 # swd, frac_ice/water/total, tau, olr, 
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
-    path ='data/satellite/gsipL3_g13_GENHEM_2013121_0*', # 'data/satellite/download.class.ngdc.noaa.gov/download/123411444/001/', #  
+    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM_2013121_01', #  'data/satellite/gsipL3_g13_GENHEM_2013121_0*', #
     sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
-    lat_range = None, #(34., 37.), #(-50, 50), # , #
-    lon_range = None, #(-100., -95.), #(170, 280), # (95, 100), #oklahoma
+    lat_range = None, #(41, 44), # (10., 13.), #(34., 37.), #(-50, 50), # , #
+    lon_range = None, #(-110, -105), # (-100., -95.), #(170, 280), # (95, 100), #oklahoma
     interp_buffer = (2,2),
     use_masked = True,
     inputs = [
@@ -218,7 +229,7 @@ def main(
                         gd.frame['lon_cell'].values], axis = 1)}
     
     print 'lat/lon extrema: ', pos_extrema 
-    print 'datetimes: ', gd.frame['datetime']
+    print 'datetimes: ', set(gd.frame['datetime'])
     
 
 
@@ -286,47 +297,69 @@ def main(
 
                 vmin = numpy.min([numpy.min(valplot), numpy.min(interpol)])
                 vmax = numpy.max([numpy.max(valplot), numpy.max(interpol)])
-
-                pyplot.scatter(latplot, lonplot, c = valplot, 
+                
+                if numpy.isnan(vmin) or numpy.isnan(vmax):
+                    pyplot.scatter(latplot, lonplot, c = valplot, 
+                        cmap = 'jet', s=10, linewidths = 0)
+                else:
+                    pyplot.scatter(latplot, lonplot, c = valplot, 
                         cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
+                    pyplot.colorbar()
+
                 xlim = ax.get_xlim()
                 ylim = ax.get_ylim()
-                
-                
-                pyplot.colorbar()
 
                 ax = pyplot.subplot(122)
-                pyplot.scatter(lat_grid, lon_grid, c = interpol, 
+                if numpy.isnan(vmin) or numpy.isnan(vmax): 
+                    pyplot.scatter(lat_grid, lon_grid, c = interpol, 
+                        cmap = 'jet', s=10, linewidths = 0)
+                else:
+                    pyplot.scatter(lat_grid, lon_grid, c = interpol, 
                         cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
                 ax.set_xlim(xlim)
                 ax.set_ylim(ylim)
-                pyplot.savefig('sphere_spline_interp-%s-%s-%i-%s.pdf' % 
-                        (inp, 'use_masked' if use_masked else '', i, str(dt)))
+                pyplot.savefig(('interp-%s-%s-%i-%s.pdf' % 
+                        (inp, 'use_masked' if use_masked else '', i, str(dt))).replace(' ', ''))
 
+def parse_imager(
+    path ='data/satellite/download.class.ngdc.noaa.gov/download/123483494/001/goes13.2013.121',
+    sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
+    lat_range = None, #(34., 37.), #(-50, 50), # , #
+    lon_range = None, #(-100., -95.), #(170, 280), # (95, 100), #oklahoma
+    interp_buffer = (2,2),
+    use_masked = True,
+    inputs = [
+            u'version', 
+            u'sensorID', 
+            u'imageDate', 
+            u'imageTime', 
+            u'startLine', 
+            u'startElem', 
+            u'time', 
+            u'dataWidth', 
+            u'lineRes', 
+            u'elemRes', 
+            u'prefixSize', 
+            u'crDate', 
+            u'crTime', 
+            u'bands', 
+            #u'auditTrail', 
+            u'data', 
+            u'lat', 
+            u'lon']):
+    
+    gd = GoesData(path+'*.nc', inputs, lat_range, lon_range, interp_buffer, 
+            use_masked = use_masked)
 
-def split_into_samples(pre_grid, post_grid, dens_thresh = 0.5, samp_size = (10, 10)):
+    print gd.frame
+    print 'new lat/lon bounds: '
+    pos_extrema = {'max': numpy.max([gd.frame['lat_cell'].values, 
+                        gd.frame['lon_cell'].values], axis = 1),
+                   'min': numpy.min([gd.frame['lat_cell'].values, 
+                        gd.frame['lon_cell'].values], axis = 1)}
     
-    x_size, y_size = post_grid.shape
-    x_inds = x_size-samp_size[0]
-    y_inds = y_size-samp_size[1]
-    print 'initializing filter matrix'
-    filters = numpy.zeros((x_inds*y_inds, x_size, y_size), dtype = 'bool')
-
-    print 'filter matrix shape: ', filters.shape
-    
-    print 'constructing filters' 
-    indxs = numpy.array(list(it.product(xrange(x_inds), xrange(y_inds))))
-    for k, (i, j) in enumerate(indxs):
-        filters[k, i:i+samp_size[0], j:j+samp_size[1]] = True
-    
-    # XXX masking in 3d arrays
-    pre_occ_densities = numpy.array([numpy.sum(pre_grid[f]) for f in filters]) / float(samp_size[0]*samp_size[1])
-    post_nan_densities = numpy.array([numpy.sum(numpy.isnan(post_grid[f])) for f in filters]) / float(samp_size[0]*samp_size[1])
-    keep = numpy.where((pre_occ_densities > dens_thresh) & (post_nan_densities == 0))[0]
-    print 'keep indices: ', keep
-    print 'x and y indices: ', indxs[keep]
-    
-    return [post_grid[f] for f in filters[keep]], indxs[keep]
+    print 'lat/lon extrema: ', pos_extrema 
+    print 'datetimes: ', gd.frame['datetime']
 
 
 if __name__ == '__main__':
