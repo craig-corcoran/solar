@@ -8,8 +8,6 @@ import netCDF4 as ncdf
 import matplotlib.pyplot as pyplot
 from scipy import interpolate
 
-
-
 # XXX whats the difference between missing and mask?
 # XXX separate into samples 
 # XXX serialize samples or frames
@@ -20,7 +18,7 @@ from scipy import interpolate
 
 class GoesData(object):
     
-    def __init__(self, path_regex, inputs, lat_range = None, lon_range = None, 
+    def __init__(self, paths, inputs, lat_range = None, lon_range = None, 
                 interp_buffer = None, use_masked = True):
         
         self.inputs = inputs
@@ -28,7 +26,6 @@ class GoesData(object):
         self.lon_range = lon_range
         self.interp_buffer = interp_buffer
 
-        paths = glob.glob(path_regex)
         assert len(paths) > 0
         
         # read netcdf file
@@ -113,7 +110,7 @@ class GoesData(object):
         else:
             keep = self.inputs + ['img_date', 'img_time', 'lat_cell', 'lon_cell']
         
-        #print 'NetCDF keys: ', ds.variables.keys()
+        print 'NetCDF keys: ', ds.variables.keys()
         for head, var in ds.variables.items():
             # only keep subset of data we care about
             if head in keep:
@@ -190,12 +187,13 @@ class GoesData(object):
 # swd, frac_ice/water/total, tau, olr, 
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
-    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM_2013121_01', #  'data/satellite/gsipL3_g13_GENHEM_2013121_0*', #
+    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM', 
     sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
     lat_range = None, #(41, 44), # (10., 13.), #(34., 37.), #(-50, 50), # , #
     lon_range = None, #(-110, -105), # (-100., -95.), #(170, 280), # (95, 100), #oklahoma
     interp_buffer = (2,2),
     use_masked = True,
+    n_files_grp = 3,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -205,10 +203,10 @@ def main(
             #'iwp', 'lwp',
             #'cld_temp','cld_press',
             'tau',
-            'frac_total_cld', 'frac_ice_cld', 'frac_water_cld',
+            'frac_total_cld', # 'frac_ice_cld', 'frac_water_cld',
             #'ch2_ccr', 'ch2_ccr_std',
-            'olr', 
-            'swd_sfc', 'swd_toa', 'swd_sfc_clr', 
+            #'olr', 
+            'swd_sfc', #'swd_toa', 'swd_sfc_clr', 
             #'swu_sfc', 'swu_toa', 'swu_toa_clr', 'swu_sfc_clr', 
             #'vis_down_sfc', 
             #'cld_type',
@@ -218,108 +216,100 @@ def main(
             #'lwusfc'
             ]):
     
-    gd = GoesData(path+'*.nc', inputs, lat_range, lon_range, interp_buffer, 
-            use_masked = use_masked)
+    paths = glob.glob(path + '*.nc')
+    n_grps = numpy.ceil(len(paths) / float(n_files_grp)).astype(int)
 
-    print gd.frame
-    print 'new lat/lon bounds: '
-    pos_extrema = {'max': numpy.max([gd.frame['lat_cell'].values, 
-                        gd.frame['lon_cell'].values], axis = 1),
-                   'min': numpy.min([gd.frame['lat_cell'].values, 
-                        gd.frame['lon_cell'].values], axis = 1)}
-    
-    print 'lat/lon extrema: ', pos_extrema 
-    print 'datetimes: ', set(gd.frame['datetime'])
-    
+    for grp in xrange(n_grps):
 
-
-    for i, dt in enumerate(set(gd.frame['datetime'])):
+        print 'processing group ,', grp
         
-        time_slice = gd.frame[gd.frame['datetime'] == dt]
+        paths_part = paths[grp*n_files_grp:(grp+1)*n_files_grp]
+        gd = GoesData(paths_part, inputs, lat_range, lon_range, interp_buffer, 
+                use_masked = use_masked)
+
+        print gd.frame
+        print 'new lat/lon bounds: '
+        pos_extrema = {'max': numpy.max([gd.frame['lat_cell'].values, 
+                            gd.frame['lon_cell'].values], axis = 1),
+                       'min': numpy.min([gd.frame['lat_cell'].values, 
+                            gd.frame['lon_cell'].values], axis = 1)}
         
-        for inp in inputs:
-            no_missing = time_slice.dropna(how='any', subset=[inp])
-            print 'length of clean points for %s: ' % inp, len(no_missing)
-            if len(no_missing) > 0:
-                lat = no_missing['lat_rad'].values
-                lon = no_missing['lon_rad'].values
-                val = no_missing[inp].values
-                
-                print 'clean lat max min: ', numpy.max(lat), numpy.min(lat)
-                print 'clean lon max min: ', numpy.max(lon), numpy.min(lon)
-              
-                #spline_built = False
-                #mult = 0.5
-                #while not spline_built:
-                    #try:
-                        #print 'building spline representation' 
-                        #spline = interpolate.SmoothSphereBivariateSpline(lat, lon, val, 
-                                                                #s=mult*len(no_missing))
-                        #spline_built = True
-                    #except ValueError as e:
-                        #print e
-                        #mult += 0.2
-                        #print 'increasing s value to %f times number of points' % mult
-                
-                frac = 0.1 # remove this fraction of the image from the borders for interpolation
-                dlat = numpy.max(lat) - numpy.min(lat)
-                dlon = numpy.max(lon) - numpy.min(lon)
-                #ilat = numpy.linspace(numpy.min(lat) + frac/2.*dlat, numpy.max(lat) - frac/2.*dlat, sample_shape[0])
-                #ilon = numpy.linspace(numpy.min(lon) + frac/2.*dlon, numpy.max(lon) - frac/2.*dlon, sample_shape[1])
-                #ilat_grid, ilon_grid = it.izip(*it.product(ilat, ilon))
-                lat_grid, lon_grid = numpy.mgrid[
-                    numpy.min(lat)+frac/2.*dlat : numpy.max(lat)-frac/2.*dlat : sample_shape[0]*1j,
-                    numpy.min(lon)+frac/2.*dlon : numpy.max(lon)-frac/2.*dlon : sample_shape[1]*1j]
-                
-                print 'interpolating to grid'
-                interpol = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
-                #interpol = spline(ilat, ilon)
-                #irbf = interpolate.Rbf(lat, lon, val, smooth = 1e-8)
-                #interpol = irbf(lat_grid, lon_grid)
+        print 'lat/lon extrema: ', pos_extrema 
+        print 'datetimes: ', set(gd.frame['datetime'])
+        
 
-                print 'interpolated data shape: ', interpol.shape
-                print 'max, min clean interpolated vals: ', numpy.max(interpol), numpy.min(interpol)
 
-                print 'plotting'
-                pyplot.clf()
-                ax = pyplot.subplot(121)
-                n_plot = 10000
-                if len(lat) > n_plot:
-                    print 'subsampling'
-                    perm = numpy.random.permutation(len(lat))
-                    latplot = lat[perm][:n_plot]
-                    lonplot = lon[perm][:n_plot]
-                    valplot = val[perm][:n_plot]
-                else:
-                    latplot = lat
-                    lonplot = lon
-                    valplot = val
+        for i, dt in enumerate(set(gd.frame['datetime'])):
+            
+            time_slice = gd.frame[gd.frame['datetime'] == dt]
+            
+            for inp in inputs:
+                no_missing = time_slice.dropna(how='any', subset=[inp])
+                print 'length of clean points for %s: ' % inp, len(no_missing)
+                if len(no_missing) > 0:
+                    lat = no_missing['lat_rad'].values
+                    lon = no_missing['lon_rad'].values
+                    val = no_missing[inp].values
+                    
+                    print 'clean lat max min: ', numpy.max(lat), numpy.min(lat)
+                    print 'clean lon max min: ', numpy.max(lon), numpy.min(lon)
+                    
+                    frac = 0.1 # remove this fraction of the image from the borders for interpolation
+                    dlat = numpy.max(lat) - numpy.min(lat)
+                    dlon = numpy.max(lon) - numpy.min(lon)
+                    lat_grid, lon_grid = numpy.mgrid[
+                        numpy.min(lat)+frac/2.*dlat : numpy.max(lat)-frac/2.*dlat : sample_shape[0]*1j,
+                        numpy.min(lon)+frac/2.*dlon : numpy.max(lon)-frac/2.*dlon : sample_shape[1]*1j]
+                    
+                    print 'interpolating to grid'
+                    interpol = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+                    #irbf = interpolate.Rbf(lat, lon, val, smooth = 1e-8)
+                    #interpol = irbf(lat_grid, lon_grid)
 
-                vmin = numpy.min([numpy.min(valplot), numpy.min(interpol)])
-                vmax = numpy.max([numpy.max(valplot), numpy.max(interpol)])
-                
-                if numpy.isnan(vmin) or numpy.isnan(vmax):
-                    pyplot.scatter(latplot, lonplot, c = valplot, 
-                        cmap = 'jet', s=10, linewidths = 0)
-                else:
-                    pyplot.scatter(latplot, lonplot, c = valplot, 
-                        cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
-                    pyplot.colorbar()
+                    #print 'interpolated data shape: ', interpol.shape
+                    #print 'max, min clean interpolated vals: ', numpy.max(interpol), numpy.min(interpol)
 
-                xlim = ax.get_xlim()
-                ylim = ax.get_ylim()
+                    print 'plotting'
+                    pyplot.clf()
+                    #ax = pyplot.subplot(121)
+                    n_plot = 10000
+                    if len(lat) > n_plot:
+                        print 'subsampling'
+                        perm = numpy.random.permutation(len(lat))
+                        latplot = lat[perm][:n_plot]
+                        lonplot = lon[perm][:n_plot]
+                        valplot = val[perm][:n_plot]
+                    else:
+                        latplot = lat
+                        lonplot = lon
+                        valplot = val
 
-                ax = pyplot.subplot(122)
-                if numpy.isnan(vmin) or numpy.isnan(vmax): 
-                    pyplot.scatter(lat_grid, lon_grid, c = interpol, 
-                        cmap = 'jet', s=10, linewidths = 0)
-                else:
-                    pyplot.scatter(lat_grid, lon_grid, c = interpol, 
-                        cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
-                ax.set_xlim(xlim)
-                ax.set_ylim(ylim)
-                pyplot.savefig(('interp-%s-%s-%i-%s.pdf' % 
-                        (inp, 'use_masked' if use_masked else '', i, str(dt))).replace(' ', ''))
+                    #vmin = numpy.min([numpy.min(valplot), numpy.min(interpol)])
+                    #vmax = numpy.max([numpy.max(valplot), numpy.max(interpol)])
+                    vmin, vmax = [numpy.nan]*2
+                    
+                    if numpy.isnan(vmin) or numpy.isnan(vmax):
+                        pyplot.scatter(latplot, lonplot, c = valplot, 
+                            cmap = 'jet', s=10, linewidths = 0)
+                    else:
+                        pyplot.scatter(latplot, lonplot, c = valplot, 
+                            cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
+                        pyplot.colorbar()
+
+                    #xlim = ax.get_xlim()
+                    #ylim = ax.get_ylim()
+
+                    #ax = pyplot.subplot(122)
+                    #if numpy.isnan(vmin) or numpy.isnan(vmax): 
+                        #pyplot.scatter(lat_grid, lon_grid, c = interpol, 
+                            #cmap = 'jet', s=10, linewidths = 0)
+                    #else:
+                        #pyplot.scatter(lat_grid, lon_grid, c = interpol, 
+                            #cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
+                    #ax.set_xlim(xlim)
+                    #ax.set_ylim(ylim)
+                    pyplot.savefig(('plots/satellite/%s-%s-%s.png' % 
+                            (inp, 'use_masked' if use_masked else '', str(dt))).replace(' / ', '/').replace(' ', '.'))
 
 def parse_imager(
     path ='data/satellite/download.class.ngdc.noaa.gov/download/123483494/001/goes13.2013.121',
