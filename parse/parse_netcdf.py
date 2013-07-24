@@ -14,42 +14,28 @@ from scipy import interpolate
 # XXX store non-spatial parameters separately?
 # XXX weight outliers lower during interpolation
 
-
-
 class GoesData(object):
     
-    def __init__(self, paths, inputs, lat_range = None, lon_range = None, 
+    def __init__(self, path, inputs, lat_range = None, lon_range = None, 
                 interp_buffer = None, use_masked = True):
         
         self.inputs = inputs
         self.lat_range = lat_range
         self.lon_range = lon_range
         self.interp_buffer = interp_buffer
-
-        assert len(paths) > 0
         
-        # read netcdf file
-        clean_frames = [None]*len(paths)
-        for i,p in enumerate(paths):
-            # read into pandas data frame
-            df, meta = self.nc_to_frame(p, use_masked = use_masked) # removes all but lat, lon, inputs, and datetime
-            clean_frames[i] = df 
-
-        self.meta = meta # should be the same across files
-
-        print 'meta data: ', meta
-        print 'concatenating all files into one frame'
-
-        # combine files into one frame
-        self.frame = pandas.concat(clean_frames, ignore_index = True) 
+        # read netcdf file into pandas data frame
+        self.frame, self.meta = self.nc_to_frame(path, use_masked = use_masked) # removes all but lat, lon, inputs, and datetime
 
         # add datetime column
         self.frame['datetime'] = self.convert_to_datetime(
                                             self.frame['img_date'].values,
                                             self.frame['img_time'].values)
+        assert (self.frame['datetime'].values == self.frame['datetime'].values[0]).all() # XXX
+        self.timestamp = self.frame['datetime'].iloc[0]#[:13]
         #self.frame = self.frame.sort('datetime')
         
-        print 'centering and rescaling data'
+        print 'rescaling data'
         self.rescale()
         
 
@@ -72,13 +58,13 @@ class GoesData(object):
                 self.frame[inp] = (var * scal) + mvar['RANGE_MIN']
         
         # center and set var/std to 1
-        self.mean_vec = self.frame[self.inputs].mean()
-        self.std_vec = self.frame[self.inputs].std()
+        #self.mean_vec = self.frame[self.inputs].mean()
+        #self.std_vec = self.frame[self.inputs].std()
 
-        print 'mean: ', numpy.array(self.mean_vec)
-        print 'std: ', numpy.array(self.std_vec)
+        #print 'mean: ', numpy.array(self.mean_vec)
+        #print 'std: ', numpy.array(self.std_vec)
 
-        #self.frame[self.inputs] = self.frame[self.inputs].astype(float) - self.mean_vec # XXX
+        #self.frame[self.inputs] = self.frame[self.inputs].astype(float) - self.mean_vec # XXX where to normalize data?
         #self.frame[self.inputs] = self.frame[self.inputs].astype(float) / self.std_vec
 
     # XXX unscale
@@ -91,7 +77,11 @@ class GoesData(object):
 
         # convert lon to 0 to 2pi
         lon = copy.deepcopy(lon)
-        lon[lon < 0] = lon[lon < 0] + 360.
+        if (type(lon) == int) or (type(lon) == float):
+            lon = lon + 360. if lon < 0 else lon
+        else:
+            print type(lon)
+            lon[lon < 0] = lon[lon < 0] + 360.
         lon = lon * (numpy.pi/180.)
 
         return lat, lon
@@ -110,7 +100,7 @@ class GoesData(object):
         else:
             keep = self.inputs + ['img_date', 'img_time', 'lat_cell', 'lon_cell']
         
-        print 'NetCDF keys: ', ds.variables.keys()
+        # print 'NetCDF keys: ', ds.variables.keys()
         for head, var in ds.variables.items():
             # only keep subset of data we care about
             if head in keep:
@@ -164,7 +154,8 @@ class GoesData(object):
             return arr.data.T, arr.mask.T
         elif type(arr) is numpy.ndarray:
             return arr.T, None
-
+    
+    # XXX doesn't need to be different for different samples; one file = one goes data
     def convert_to_datetime(self, img_date, img_time):
         ''' convert from two arrays of date and time in GOES NetCDF format to 
         pandas datetime '''
@@ -187,13 +178,16 @@ class GoesData(object):
 # swd, frac_ice/water/total, tau, olr, 
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
-    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM', 
-    sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
-    lat_range = None, #(41, 44), # (10., 13.), #(34., 37.), #(-50, 50), # , #
-    lon_range = None, #(-110, -105), # (-100., -95.), #(170, 280), # (95, 100), #oklahoma
+    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM_2013122_1', 
+    sample_shape = (10,10,2), # (n_lat, n_lon, n_time)
+    lat_range = (34., 38.),
+    lon_range = (-100., -96.), #oklahoma
+    dlat = 0.1,
+    dlon = 0.1,
     interp_buffer = (2,2),
-    use_masked = True,
-    n_files_grp = 3,
+    dens_thresh = 0.5,
+    sample_stride = (5, 5),
+    delta_time = 1., # in hours
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -217,139 +211,134 @@ def main(
             ]):
     
     paths = glob.glob(path + '*.nc')
-    n_grps = numpy.ceil(len(paths) / float(n_files_grp)).astype(int)
+    if lat_range is None:
+        rad_lat_min = rad_lon_min = None
+        rad_lat_max = rad_lon_max = None
+    else:
+        rad_lat_min, rad_lon_min = GoesData.latlon_to_thetaphi(lat_range[0], lon_range[0])
+        rad_lat_max, rad_lon_max = GoesData.latlon_to_thetaphi(lat_range[1], lon_range[1])
 
-    for grp in xrange(n_grps):
+    lat_diff = (rad_lat_max - rad_lat_min)
+    lon_diff = (rad_lon_max - rad_lon_min)
 
-        print 'processing group ,', grp
-        
-        paths_part = paths[grp*n_files_grp:(grp+1)*n_files_grp]
-        gd = GoesData(paths_part, inputs, lat_range, lon_range, interp_buffer, 
-                use_masked = use_masked)
-
-        print gd.frame
-        print 'new lat/lon bounds: '
-        pos_extrema = {'max': numpy.max([gd.frame['lat_cell'].values, 
-                            gd.frame['lon_cell'].values], axis = 1),
-                       'min': numpy.min([gd.frame['lat_cell'].values, 
-                            gd.frame['lon_cell'].values], axis = 1)}
-        
-        print 'lat/lon extrema: ', pos_extrema 
-        print 'datetimes: ', set(gd.frame['datetime'])
-        
-
-
-        for i, dt in enumerate(set(gd.frame['datetime'])):
-            
-            time_slice = gd.frame[gd.frame['datetime'] == dt]
-            
-            for inp in inputs:
-                no_missing = time_slice.dropna(how='any', subset=[inp])
-                print 'length of clean points for %s: ' % inp, len(no_missing)
-                if len(no_missing) > 0:
-                    lat = no_missing['lat_rad'].values
-                    lon = no_missing['lon_rad'].values
-                    val = no_missing[inp].values
-                    
-                    print 'clean lat max min: ', numpy.max(lat), numpy.min(lat)
-                    print 'clean lon max min: ', numpy.max(lon), numpy.min(lon)
-                    
-                    frac = 0.1 # remove this fraction of the image from the borders for interpolation
-                    dlat = numpy.max(lat) - numpy.min(lat)
-                    dlon = numpy.max(lon) - numpy.min(lon)
-                    lat_grid, lon_grid = numpy.mgrid[
-                        numpy.min(lat)+frac/2.*dlat : numpy.max(lat)-frac/2.*dlat : sample_shape[0]*1j,
-                        numpy.min(lon)+frac/2.*dlon : numpy.max(lon)-frac/2.*dlon : sample_shape[1]*1j]
-                    
-                    print 'interpolating to grid'
-                    interpol = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
-                    #irbf = interpolate.Rbf(lat, lon, val, smooth = 1e-8)
-                    #interpol = irbf(lat_grid, lon_grid)
-
-                    #print 'interpolated data shape: ', interpol.shape
-                    #print 'max, min clean interpolated vals: ', numpy.max(interpol), numpy.min(interpol)
-
-                    print 'plotting'
-                    pyplot.clf()
-                    #ax = pyplot.subplot(121)
-                    n_plot = 10000
-                    if len(lat) > n_plot:
-                        print 'subsampling'
-                        perm = numpy.random.permutation(len(lat))
-                        latplot = lat[perm][:n_plot]
-                        lonplot = lon[perm][:n_plot]
-                        valplot = val[perm][:n_plot]
-                    else:
-                        latplot = lat
-                        lonplot = lon
-                        valplot = val
-
-                    #vmin = numpy.min([numpy.min(valplot), numpy.min(interpol)])
-                    #vmax = numpy.max([numpy.max(valplot), numpy.max(interpol)])
-                    vmin, vmax = [numpy.nan]*2
-                    
-                    if numpy.isnan(vmin) or numpy.isnan(vmax):
-                        pyplot.scatter(latplot, lonplot, c = valplot, 
-                            cmap = 'jet', s=10, linewidths = 0)
-                    else:
-                        pyplot.scatter(latplot, lonplot, c = valplot, 
-                            cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
-                        pyplot.colorbar()
-
-                    #xlim = ax.get_xlim()
-                    #ylim = ax.get_ylim()
-
-                    #ax = pyplot.subplot(122)
-                    #if numpy.isnan(vmin) or numpy.isnan(vmax): 
-                        #pyplot.scatter(lat_grid, lon_grid, c = interpol, 
-                            #cmap = 'jet', s=10, linewidths = 0)
-                    #else:
-                        #pyplot.scatter(lat_grid, lon_grid, c = interpol, 
-                            #cmap = 'jet', s=10, linewidths = 0, vmin=vmin, vmax=vmax)
-                    #ax.set_xlim(xlim)
-                    #ax.set_ylim(ylim)
-                    pyplot.savefig(('plots/satellite/%s-%s-%s.png' % 
-                            (inp, 'use_masked' if use_masked else '', str(dt))).replace(' / ', '/').replace(' ', '.'))
-
-def parse_imager(
-    path ='data/satellite/download.class.ngdc.noaa.gov/download/123483494/001/goes13.2013.121',
-    sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
-    lat_range = None, #(34., 37.), #(-50, 50), # , #
-    lon_range = None, #(-100., -95.), #(170, 280), # (95, 100), #oklahoma
-    interp_buffer = (2,2),
-    use_masked = True,
-    inputs = [
-            u'version', 
-            u'sensorID', 
-            u'imageDate', 
-            u'imageTime', 
-            u'startLine', 
-            u'startElem', 
-            u'time', 
-            u'dataWidth', 
-            u'lineRes', 
-            u'elemRes', 
-            u'prefixSize', 
-            u'crDate', 
-            u'crTime', 
-            u'bands', 
-            #u'auditTrail', 
-            u'data', 
-            u'lat', 
-            u'lon']):
+    dlat = dlat * numpy.pi / 180. # convert to radians
+    dlon = dlon * numpy.pi / 180. 
     
-    gd = GoesData(path+'*.nc', inputs, lat_range, lon_range, interp_buffer, 
-            use_masked = use_masked)
+    # check that sample window is smaller than observation window
+    assert (dlat * sample_shape[0]) < lat_diff
+    assert (dlon * sample_shape[1]) < lon_diff
+    n_lat_cells = numpy.ceil(lat_diff / dlat).astype(int)
+    n_lon_cells = numpy.ceil(lon_diff / dlon).astype(int)
 
-    print gd.frame
-    print 'new lat/lon bounds: '
-    pos_extrema = {'max': numpy.max([gd.frame['lat_cell'].values, 
-                        gd.frame['lon_cell'].values], axis = 1),
-                   'min': numpy.min([gd.frame['lat_cell'].values, 
-                        gd.frame['lon_cell'].values], axis = 1)}
+    lat_grid, lon_grid = numpy.mgrid[
+        rad_lat_min : rad_lat_max : n_lat_cells*1j,
+        rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
-    print 'lat/lon extrema: ', pos_extrema 
-    print 'datetimes: ', gd.frame['datetime']
+    
+    samples = {}
+    for j, p in enumerate(paths):
+
+        print 'file number: ', j
+        
+        
+        # data from the given netcdf file
+        gd = GoesData(p, inputs, lat_range, lon_range, interp_buffer)
+
+        interp_data = numpy.ones((n_lat_cells, n_lon_cells, len(inputs))) * numpy.nan
+        # perform interpolation for each input
+        for i, inp in enumerate(inputs):
+            not_missing = gd.frame.dropna(how='any', subset=[inp])
+            print 'length of clean points for %s: ' % inp, len(not_missing)
+            
+            if len(not_missing) > 0:
+                lat = not_missing['lat_rad'].values
+                lon = not_missing['lon_rad'].values
+                val = not_missing[inp].values
+                    
+                print 'interpolating to grid'
+                interp_data[:,:,i] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+
+        # drop grid cells missing any of the inputs
+        gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
+        gd.frame['lon_ind'] = numpy.floor((gd.frame['lon_rad'] - rad_lon_min) / dlon).astype(int)
+        grp = gd.frame.groupby(['lat_ind', 'lon_ind'])
+        grid = grp.aggregate(numpy.mean)
+        grid.reset_index(inplace = True)
+        grid = grid.dropna(how = 'any', subset = inputs)
+        
+        # for each window position given stride length
+        for x, y in it.product(numpy.arange(0, n_lat_cells - sample_shape[0], sample_stride[0]), 
+                               numpy.arange(0, n_lon_cells - sample_shape[1], sample_stride[1])):
+            print 'window position: ', x, y
+
+            lat_ind = grid['lat_ind']
+            lon_ind = grid['lon_ind']
+            present = grid[ (lat_ind >= x) & (lat_ind < (x + sample_shape[0])) &
+                            (lon_ind >= y) & (lon_ind < (y + sample_shape[1])) ]
+            # if density of observed data is high enough
+            print len(present)
+            print (dens_thresh * sample_shape[0]*sample_shape[1])
+            if len(present) > (dens_thresh * sample_shape[0]*sample_shape[1]):
+                print 'storing sample'
+                # store this window as a sample by timestep and position
+                samples[(gd.timestamp, (x,y))] = interp_data[x:x+sample_shape[0], 
+                                                             y:y+sample_shape[1],
+                                                              :]
+    # convert samples dict to DataFrame
+    samp_keys = samples.keys()
+    datetimes = [k[0] for k in samp_keys]
+    positions = [k[1] for k in samp_keys]
+    arrays = pandas.Series(samples.values())
+    sample_df = pandas.DataFrame({'datetime':datetimes, 
+                                'position':positions, 
+                                'array' : arrays})
+    
+    datetimes = sample_df['datetime']
+    positions = sample_df['position']
+    d_time = pandas.DateOffset(hours = delta_time)
+
+    # for all one time step samples find neighboring times with same location      
+    for i in sample_df.index:
+        
+        row = sample_df.iloc[i]
+        dt = row['datetime']
+        pos = row['position']
+        
+        # XXX extend this to more than one time step
+        next_row = sample_df[(datetimes == (dt+d_time)) & (positions == pos)]
+        if len(next_row) > 0:
+            print 'sample collected'
+            print row
+            print next_row.iloc[0]  
+
+    
+#def parse_imager(
+    #path ='data/satellite/download.class.ngdc.noaa.gov/download/123483494/001/goes13.2013.121',
+    #sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
+    #lat_range = None, #(34., 37.), #(-50, 50), # , #
+    #lon_range = None, #(-100., -95.), #(170, 280), # (95, 100), #oklahoma
+    #interp_buffer = (2,2),
+    #use_masked = True,
+    #inputs = [
+            #u'version', 
+            #u'sensorID', 
+            #u'imageDate', 
+            #u'imageTime', 
+            #u'startLine', 
+            #u'startElem', 
+            #u'time', 
+            #u'dataWidth', 
+            #u'lineRes', 
+            #u'elemRes', 
+            #u'prefixSize', 
+            #u'crDate', 
+            #u'crTime', 
+            #u'bands', 
+            ##u'auditTrail', 
+            #u'data', 
+            #u'lat', 
+            #u'lon']):
+
 
 
 if __name__ == '__main__':
