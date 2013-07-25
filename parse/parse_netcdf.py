@@ -179,7 +179,8 @@ class GoesData(object):
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
     path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM_2013122_1', 
-    sample_shape = (10,10,2), # (n_lat, n_lon, n_time)
+    window_shape = (10,10), # (n_lat, n_lon)
+    n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
     lon_range = (-100., -96.), #oklahoma
     dlat = 0.1,
@@ -225,8 +226,8 @@ def main(
     dlon = dlon * numpy.pi / 180. 
     
     # check that sample window is smaller than observation window
-    assert (dlat * sample_shape[0]) < lat_diff
-    assert (dlon * sample_shape[1]) < lon_diff
+    assert (dlat * window_shape[0]) < lat_diff
+    assert (dlon * window_shape[1]) < lon_diff
     n_lat_cells = numpy.ceil(lat_diff / dlat).astype(int)
     n_lon_cells = numpy.ceil(lon_diff / dlon).astype(int)
 
@@ -267,22 +268,22 @@ def main(
         grid = grid.dropna(how = 'any', subset = inputs)
         
         # for each window position given stride length
-        for x, y in it.product(numpy.arange(0, n_lat_cells - sample_shape[0], sample_stride[0]), 
-                               numpy.arange(0, n_lon_cells - sample_shape[1], sample_stride[1])):
+        for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
+                               numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
             print 'window position: ', x, y
 
             lat_ind = grid['lat_ind']
             lon_ind = grid['lon_ind']
-            present = grid[ (lat_ind >= x) & (lat_ind < (x + sample_shape[0])) &
-                            (lon_ind >= y) & (lon_ind < (y + sample_shape[1])) ]
+            present = grid[ (lat_ind >= x) & (lat_ind < (x + window_shape[0])) &
+                            (lon_ind >= y) & (lon_ind < (y + window_shape[1])) ]
             # if density of observed data is high enough
             print len(present)
-            print (dens_thresh * sample_shape[0]*sample_shape[1])
-            if len(present) > (dens_thresh * sample_shape[0]*sample_shape[1]):
+            print (dens_thresh * window_shape[0]*window_shape[1])
+            if len(present) > (dens_thresh * window_shape[0]*window_shape[1]):
                 print 'storing sample'
                 # store this window as a sample by timestep and position
-                samples[(gd.timestamp, (x,y))] = interp_data[x:x+sample_shape[0], 
-                                                             y:y+sample_shape[1],
+                samples[(gd.timestamp, (x,y))] = interp_data[x:x+window_shape[0], 
+                                                             y:y+window_shape[1],
                                                               :]
     # convert samples dict to DataFrame
     samp_keys = samples.keys()
@@ -297,19 +298,36 @@ def main(
     positions = sample_df['position']
     d_time = pandas.DateOffset(hours = delta_time)
 
+    # XXX how to handle even sized windows?
+    center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+    
     # for all one time step samples find neighboring times with same location      
+    windows = []; targets = []
     for i in sample_df.index:
         
         row = sample_df.iloc[i]
         dt = row['datetime']
         pos = row['position']
         
-        # XXX extend this to more than one time step
-        next_row = sample_df[(datetimes == (dt+d_time)) & (positions == pos)]
-        if len(next_row) > 0:
-            print 'sample collected'
-            print row
-            print next_row.iloc[0]  
+        mask = numpy.zeros(len(datetimes), dtype=bool)
+        for t in xrange(n_frames):
+            mask = mask | (datetimes == (dt+(t+1)*d_time))
+            
+        next_rows = sample_df[mask & (positions == pos)]
+        if len(next_rows) == (n_frames): # if there are n_frames valid frames
+            next_rows.sort('datetime')
+            winds = numpy.empty((n_frames, window_shape[0], window_shape[1]))
+            winds[0] = row['array']
+            for w in xrange(n_frames-1): # for all but the last subsequent frame
+                winds[w+1] = next_rows.iloc[w]['array']
+            
+            windows.append(winds)
+            targets.append(next_rows.iloc[-1]['array'][center_ind]) # target 
+
+    print windows
+    print targets
+    print len(windows)
+    print len(targets)
 
     
 #def parse_imager(
