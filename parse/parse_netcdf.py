@@ -4,9 +4,11 @@ import copy
 import numpy
 import pandas
 import itertools as it
+import cPickle as pickle
 import netCDF4 as ncdf
 import matplotlib.pyplot as pyplot
 from scipy import interpolate
+from solar.util import openz
 
 # XXX whats the difference between missing and mask?
 # XXX separate into samples 
@@ -35,7 +37,6 @@ class GoesData(object):
         self.timestamp = self.frame['datetime'].iloc[0]#[:13]
         #self.frame = self.frame.sort('datetime')
         
-        print 'rescaling data'
         self.rescale()
         
 
@@ -80,7 +81,6 @@ class GoesData(object):
         if (type(lon) == int) or (type(lon) == float):
             lon = lon + 360. if lon < 0 else lon
         else:
-            print type(lon)
             lon[lon < 0] = lon[lon < 0] + 360.
         lon = lon * (numpy.pi/180.)
 
@@ -110,9 +110,6 @@ class GoesData(object):
                 if len(data) == 1:
                     data = data.repeat(n_rows)
                 else: 
-                    #print len(data)
-                    #print data.shape
-                    #print n_rows
                     assert len(data) == n_rows 
                 
                 # set missing values to nan
@@ -125,7 +122,6 @@ class GoesData(object):
                     if mask is not None: 
                         data[mask] = numpy.nan
                 
-                #print var.__dict__
                 df[head] = data # add column to data frame
                 
                 # collect meta data for variable
@@ -178,7 +174,7 @@ class GoesData(object):
 # swd, frac_ice/water/total, tau, olr, 
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
-    path = 'data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/gsipL3_g13_GENHEM_2013122_1', 
+    path = 'solar/data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/', 
     window_shape = (10,10), # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
@@ -239,25 +235,23 @@ def main(
     samples = {}
     for j, p in enumerate(paths):
 
-        print 'file number: ', j
-        
+        print 'file number: ', j 
         
         # data from the given netcdf file
         gd = GoesData(p, inputs, lat_range, lon_range, interp_buffer)
 
-        interp_data = numpy.ones((n_lat_cells, n_lon_cells, len(inputs))) * numpy.nan
+        interp_data = numpy.ones((len(inputs), n_lat_cells, n_lon_cells)) * numpy.nan
         # perform interpolation for each input
         for i, inp in enumerate(inputs):
             not_missing = gd.frame.dropna(how='any', subset=[inp])
-            print 'length of clean points for %s: ' % inp, len(not_missing)
+            #print 'length of clean points for %s: ' % inp, len(not_missing)
             
             if len(not_missing) > 0:
                 lat = not_missing['lat_rad'].values
                 lon = not_missing['lon_rad'].values
                 val = not_missing[inp].values
                     
-                print 'interpolating to grid'
-                interp_data[:,:,i] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+                interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
 
         # drop grid cells missing any of the inputs
         gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
@@ -270,21 +264,17 @@ def main(
         # for each window position given stride length
         for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
                                numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
-            print 'window position: ', x, y
 
             lat_ind = grid['lat_ind']
             lon_ind = grid['lon_ind']
             present = grid[ (lat_ind >= x) & (lat_ind < (x + window_shape[0])) &
                             (lon_ind >= y) & (lon_ind < (y + window_shape[1])) ]
             # if density of observed data is high enough
-            print len(present)
-            print (dens_thresh * window_shape[0]*window_shape[1])
             if len(present) > (dens_thresh * window_shape[0]*window_shape[1]):
-                print 'storing sample'
                 # store this window as a sample by timestep and position
-                samples[(gd.timestamp, (x,y))] = interp_data[x:x+window_shape[0], 
-                                                             y:y+window_shape[1],
-                                                              :]
+                samples[(gd.timestamp, (x,y))] = interp_data[:,x:x+window_shape[0], 
+                                                               y:y+window_shape[1]]
+                                                        
     # convert samples dict to DataFrame
     samp_keys = samples.keys()
     datetimes = [k[0] for k in samp_keys]
@@ -316,18 +306,21 @@ def main(
         next_rows = sample_df[mask & (positions == pos)]
         if len(next_rows) == (n_frames): # if there are n_frames valid frames
             next_rows.sort('datetime')
-            winds = numpy.empty((n_frames, window_shape[0], window_shape[1]))
+            winds = numpy.empty((n_frames, len(inputs), window_shape[0], window_shape[1]))
             winds[0] = row['array']
             for w in xrange(n_frames-1): # for all but the last subsequent frame
                 winds[w+1] = next_rows.iloc[w]['array']
             
             windows.append(winds)
-            targets.append(next_rows.iloc[-1]['array'][center_ind]) # target 
+            targets.append(next_rows.iloc[-1]['array'][:,center_ind[0],center_ind[1]]) # target 
 
-    print windows
-    print targets
+    windows = numpy.array(windows)
+    targets = numpy.array(targets)
+    dataset = {'input':windows, 'target':targets}
     print len(windows)
-    print len(targets)
+
+    with openz('solar/data/processed/goes-insolation.pickle.gz', 'wb') as pfile:
+        pickle.dump(dataset, pfile)
 
     
 #def parse_imager(
