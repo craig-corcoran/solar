@@ -11,10 +11,7 @@ from scipy import interpolate
 from solar.util import openz
 
 # XXX whats the difference between missing and mask?
-# XXX separate into samples 
-# XXX serialize samples or frames
 # XXX store non-spatial parameters separately?
-# XXX weight outliers lower during interpolation
 
 class GoesData(object):
     
@@ -174,17 +171,18 @@ class GoesData(object):
 # swd, frac_ice/water/total, tau, olr, 
 @plac.annotations(path = 'path to netCDF (.nc) file')
 def main(
-    path = 'solar/data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/', 
-    window_shape = (10,10), # (n_lat, n_lon)
+    path = 'solar/data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/', #gsipL3_g13_GENHEM_2013121_1', 
+    window_shape = (3,3), # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
     lon_range = (-100., -96.), #oklahoma
     dlat = 0.1,
     dlon = 0.1,
     interp_buffer = (2,2),
-    dens_thresh = 0.5,
-    sample_stride = (5, 5),
+    dens_thresh = 0.6,
+    sample_stride = (2, 2),
     delta_time = 1., # in hours
+    centered = True,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -224,8 +222,11 @@ def main(
     # check that sample window is smaller than observation window
     assert (dlat * window_shape[0]) < lat_diff
     assert (dlon * window_shape[1]) < lon_diff
+
     n_lat_cells = numpy.ceil(lat_diff / dlat).astype(int)
     n_lon_cells = numpy.ceil(lon_diff / dlon).astype(int)
+    n_wind_cells = window_shape[0]*window_shape[1]
+    n_channels = len(inputs)
 
     lat_grid, lon_grid = numpy.mgrid[
         rad_lat_min : rad_lat_max : n_lat_cells*1j,
@@ -240,7 +241,7 @@ def main(
         # data from the given netcdf file
         gd = GoesData(p, inputs, lat_range, lon_range, interp_buffer)
 
-        interp_data = numpy.ones((len(inputs), n_lat_cells, n_lon_cells)) * numpy.nan
+        interp_data = numpy.ones((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
         # perform interpolation for each input
         for i, inp in enumerate(inputs):
             not_missing = gd.frame.dropna(how='any', subset=[inp])
@@ -269,11 +270,13 @@ def main(
             lon_ind = grid['lon_ind']
             present = grid[ (lat_ind >= x) & (lat_ind < (x + window_shape[0])) &
                             (lon_ind >= y) & (lon_ind < (y + window_shape[1])) ]
-            # if density of observed data is high enough
-            if len(present) > (dens_thresh * window_shape[0]*window_shape[1]):
+
+            interp_window = interp_data[:,x:x+window_shape[0], 
+                                          y:y+window_shape[1]]
+            # if density of observed data is high enough and there are no nans in the interpolated data
+            if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
                 # store this window as a sample by timestep and position
-                samples[(gd.timestamp, (x,y))] = interp_data[:,x:x+window_shape[0], 
-                                                               y:y+window_shape[1]]
+                samples[(gd.timestamp, (x,y))] = interp_window
                                                         
     # convert samples dict to DataFrame
     samp_keys = samples.keys()
@@ -288,7 +291,6 @@ def main(
     positions = sample_df['position']
     d_time = pandas.DateOffset(hours = delta_time)
 
-    # XXX how to handle even sized windows?
     center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
     
     # for all one time step samples find neighboring times with same location      
@@ -306,50 +308,45 @@ def main(
         next_rows = sample_df[mask & (positions == pos)]
         if len(next_rows) == (n_frames): # if there are n_frames valid frames
             next_rows.sort('datetime')
-            winds = numpy.empty((n_frames, len(inputs), window_shape[0], window_shape[1]))
-            winds[0] = row['array']
+            winds = numpy.empty((n_frames, n_channels, n_wind_cells))
+            winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
             for w in xrange(n_frames-1): # for all but the last subsequent frame
-                winds[w+1] = next_rows.iloc[w]['array']
+                winds[w+1] = numpy.reshape(next_rows.iloc[w]['array'], (n_channels, n_wind_cells))
             
             windows.append(winds)
             targets.append(next_rows.iloc[-1]['array'][:,center_ind[0],center_ind[1]]) # target 
 
     windows = numpy.array(windows)
     targets = numpy.array(targets)
-    dataset = {'input':windows, 'target':targets}
-    print len(windows)
 
-    with openz('solar/data/processed/goes-insolation.pickle.gz', 'wb') as pfile:
+    print windows.shape
+    print targets.shape
+    stats = numpy.zeros((n_channels,2))
+    if centered:
+    # normalize the data (only using windows, ignoring targets currently)
+        for i in xrange(n_channels):
+            mn = numpy.mean(windows[:,:,i,:])
+            std = numpy.std(windows[:,:,i,:])
+            stats[i,:] = [mn, std]
+            
+            windows[:,:,i,:] = windows[:,:,i,:] - mn
+            windows[:,:,i,:] = windows[:,:,i,:] / std
+
+            targets[:,i] = targets[:,i] - mn
+            targets[:,i] = targets[:,i] / std
+            
+            print 'window mean: ', mn
+            print 'window std: ', std
+            print 'channel %i target mean after normalization: ' % i, numpy.mean(targets[:,i])
+            print 'channel %i target std after normalization: ' % i, numpy.std(targets[:,i])
+
+    # windows is shape (n_samples, n_frames, n_channels, n_wind_cells)
+    dataset = {'input':windows, 'target':targets, 'names':inputs, 'stats': stats}
+    print 'number of samples collected: ', len(windows)
+
+    with openz('solar/data/processed/goes-insolation.nf-%i.nc-%i.ws-%i.str-%i.dth-%s.pickle.gz' % 
+            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh)), 'wb') as pfile:
         pickle.dump(dataset, pfile)
-
-    
-#def parse_imager(
-    #path ='data/satellite/download.class.ngdc.noaa.gov/download/123483494/001/goes13.2013.121',
-    #sample_shape = (50,50,2), # (n_lat, n_lon, n_time)
-    #lat_range = None, #(34., 37.), #(-50, 50), # , #
-    #lon_range = None, #(-100., -95.), #(170, 280), # (95, 100), #oklahoma
-    #interp_buffer = (2,2),
-    #use_masked = True,
-    #inputs = [
-            #u'version', 
-            #u'sensorID', 
-            #u'imageDate', 
-            #u'imageTime', 
-            #u'startLine', 
-            #u'startElem', 
-            #u'time', 
-            #u'dataWidth', 
-            #u'lineRes', 
-            #u'elemRes', 
-            #u'prefixSize', 
-            #u'crDate', 
-            #u'crTime', 
-            #u'bands', 
-            ##u'auditTrail', 
-            #u'data', 
-            #u'lat', 
-            #u'lon']):
-
 
 
 if __name__ == '__main__':
