@@ -54,16 +54,6 @@ class GoesData(object):
                 var = self.frame[inp].astype(float) - mvar['SCALED_MIN']
                 scal = float(mvar['RANGE_MAX'] - mvar['RANGE_MIN']) / float(mvar['SCALED_MAX'] - mvar['SCALED_MIN'])
                 self.frame[inp] = (var * scal) + mvar['RANGE_MIN']
-        
-        # center and set var/std to 1
-        #self.mean_vec = self.frame[self.inputs].mean()
-        #self.std_vec = self.frame[self.inputs].std()
-
-        #print 'mean: ', numpy.array(self.mean_vec)
-        #print 'std: ', numpy.array(self.std_vec)
-
-        #self.frame[self.inputs] = self.frame[self.inputs].astype(float) - self.mean_vec # XXX where to normalize data?
-        #self.frame[self.inputs] = self.frame[self.inputs].astype(float) / self.std_vec
 
     # XXX unscale
     # convert theta/phi to lat/lon
@@ -169,9 +159,24 @@ class GoesData(object):
 
 
 # swd, frac_ice/water/total, tau, olr, 
-@plac.annotations(path = 'path to netCDF (.nc) file')
+#(help, kind, abbrev, type, choices, metavar)
+@plac.annotations(
+path = ('path to netCDF (.nc) file', 'option', None, str),
+window_shape = ('2-tuple shape of sample grid window', 'option', None, None),
+n_frames = ('number of past timesteps into the past used for prediction', 'option', None, int),
+lat_range = ('2-tuple of min and max latitudes to use for samples in degrees', 'option', None, None),
+lon_range = ('2-tuple of min and max longitudes to use for samples in degrees', 'option', None, None),
+dlat = ('delta latitude for interpolated grid', 'option', None, float),
+dlon = ('delta longitude for interpolated grid', 'option', None, float),
+interp_buffer = ('2-tuple in degrees of buffer around lat/lon_range to include for interpolation', 'option', None, None),
+dens_thresh = ('fraction of full observation density that must be present for sample to be considered valid', 'option', None, float),
+sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, None),
+delta_time = ('difference in time between samples in hours', 'option', None, float),
+normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
+inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
+)
 def main(
-    path = 'solar/data/satellite/download.class.ngdc.noaa.gov/download/123483484/001/', #gsipL3_g13_GENHEM_2013121_1', 
+    path = 'data/satellite/raw/gsipL3_g13_GENHEM_2013121_1', 
     window_shape = (3,3), # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
@@ -182,7 +187,7 @@ def main(
     dens_thresh = 0.6,
     sample_stride = (2, 2),
     delta_time = 1., # in hours
-    centered = True,
+    normalized = True,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -204,6 +209,10 @@ def main(
             #'lwdsfc',
             #'lwusfc'
             ]):
+    ''' 
+    A script for parsing a collection of netcdf files into a dictionary of 
+    input grids and target values for the given input channels
+    '''
     
     paths = glob.glob(path + '*.nc')
     if lat_range is None:
@@ -232,6 +241,7 @@ def main(
         rad_lat_min : rad_lat_max : n_lat_cells*1j,
         rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
+    print 'processing files from %s' % path
     
     samples = {}
     for j, p in enumerate(paths):
@@ -293,8 +303,9 @@ def main(
 
     center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
     
+    print 'finding neighboring frames of time-length %i' % (n_frames + 1)
     # for all one time step samples find neighboring times with same location      
-    windows = []; targets = []
+    windows = None; targets = None; timestamps = None
     for i in sample_df.index:
         
         row = sample_df.iloc[i]
@@ -310,20 +321,28 @@ def main(
             next_rows.sort('datetime')
             winds = numpy.empty((n_frames, n_channels, n_wind_cells))
             winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
-            for w in xrange(n_frames-1): # for all but the last subsequent frame
-                winds[w+1] = numpy.reshape(next_rows.iloc[w]['array'], (n_channels, n_wind_cells))
+
+            # flatten all but the last frame, the last used for target
+            for w in xrange(n_frames-1): 
+                winds[w+1] = numpy.reshape(next_rows.iloc[w]['array'], (n_channels, n_wind_cells)) 
             
-            windows.append(winds)
-            targets.append(next_rows.iloc[-1]['array'][:,center_ind[0],center_ind[1]]) # target 
+            times = numpy.append([dt], next_rows['datetime'])
 
-    windows = numpy.array(windows)
-    targets = numpy.array(targets)
+            if windows is None:
+                windows = winds[None,:,:,:]
+                targets = next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]]
+                timestamps = times[None,:]
+            else:
+                windows = numpy.append(windows, winds[None,:,:,:], axis = 0)
+                targets = numpy.append(targets, next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]], axis = 0)
+                timestamps = numpy.append(timestamps, times[None,:], axis = 0)
+                
+                assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] # XXX keep?
 
-    print windows.shape
-    print targets.shape
-    stats = numpy.zeros((n_channels,2))
-    if centered:
-    # normalize the data (only using windows, ignoring targets currently)
+    stats = numpy.zeros((n_channels,2)); stats[:,1] = 1.
+    if normalized:
+        print 'normalizing the data'
+        # normalize the data (only using windows, ignoring targets currently)
         for i in xrange(n_channels):
             mn = numpy.mean(windows[:,:,i,:])
             std = numpy.std(windows[:,:,i,:])
@@ -335,17 +354,38 @@ def main(
             targets[:,i] = targets[:,i] - mn
             targets[:,i] = targets[:,i] / std
             
+            print inputs[i], ': '
             print 'window mean: ', mn
             print 'window std: ', std
-            print 'channel %i target mean after normalization: ' % i, numpy.mean(targets[:,i])
-            print 'channel %i target std after normalization: ' % i, numpy.std(targets[:,i])
+            print 'target mean after normalization: ', numpy.mean(targets[:,i])
+            print 'target std after normalization: ', numpy.std(targets[:,i])
 
     # windows is shape (n_samples, n_frames, n_channels, n_wind_cells)
-    dataset = {'input':windows, 'target':targets, 'names':inputs, 'stats': stats}
-    print 'number of samples collected: ', len(windows)
+    dataset = {
+              'input':windows, 
+              'target':targets, 
+              'datetimes':timestamps,
+              'names':inputs, 
+              'norm-stats': stats,
+              'n-frames':n_frames,
+              'n-channels':n_channels,
+              'sample-stride':sample_stride,
+              'dens-thresh':dens_thresh,
+              'lat-range':lat_range,
+              'lon-range':lon_range,
+              'dlat':dlat,
+              'dlon':dlon,
+              'dt':delta_time,
+              'window-shape':window_shape,
+              'normalized':normalized,
+              'data-path':path
+              }
 
-    with openz('solar/data/processed/goes-insolation.nf-%i.nc-%i.ws-%i.str-%i.dth-%s.pickle.gz' % 
-            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh)), 'wb') as pfile:
+    print 'number of samples collected: ', windows.shape[0]
+    print 'saving to file'
+
+    with openz('data/satellite/processed/goes-insolation.nf-%i.nc-%i.ws-%i.str-%i.dth-%s.nsamp-%i.pickle.gz' % 
+            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), windows.shape[0]), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
 
