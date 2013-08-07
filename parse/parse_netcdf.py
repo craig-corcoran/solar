@@ -3,7 +3,9 @@ import glob
 import copy
 import numpy
 import pandas
+import functools
 import itertools as it
+import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
 import matplotlib.pyplot as pyplot
@@ -158,6 +160,71 @@ class GoesData(object):
                             hour[i]) for i in xrange(n_pts)]
 
 
+
+def parse_nc(
+             path, 
+             inputs, 
+             lat_range, 
+             lon_range, 
+             interp_buffer, 
+             n_channels, 
+             n_lat_cells, 
+             n_lon_cells,
+             n_wind_cells,
+             lat_grid,
+             lon_grid,
+             rad_lat_min,
+             rad_lon_min,
+             dlat,
+             dlon,
+             sample_stride,
+             dens_thresh,
+             window_shape
+             ):
+
+    samples = {}
+    
+    gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer)
+    interp_data = numpy.ones((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
+    # perform interpolation for each input
+    for i, inp in enumerate(inputs):
+        not_missing = gd.frame.dropna(how='any', subset=[inp])
+        #print 'length of clean points for %s: ' % inp, len(not_missing)
+        
+        if len(not_missing) > 0:
+            lat = not_missing['lat_rad'].values
+            lon = not_missing['lon_rad'].values
+            val = not_missing[inp].values
+                
+            interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+
+    # drop grid cells missing any of the inputs
+    gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
+    gd.frame['lon_ind'] = numpy.floor((gd.frame['lon_rad'] - rad_lon_min) / dlon).astype(int)
+    grp = gd.frame.groupby(['lat_ind', 'lon_ind'])
+    grid = grp.aggregate(numpy.mean)
+    grid.reset_index(inplace = True)
+    grid = grid.dropna(how = 'any', subset = inputs)
+    
+    # for each window position given stride length
+    for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
+                           numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
+
+        lat_ind = grid['lat_ind']
+        lon_ind = grid['lon_ind']
+        present = grid[ (lat_ind >= x) & (lat_ind < (x + window_shape[0])) &
+                        (lon_ind >= y) & (lon_ind < (y + window_shape[1])) ]
+
+        interp_window = interp_data[:,x:x+window_shape[0], 
+                                      y:y+window_shape[1]]
+        # if density of observed data is high enough and there are no nans in the interpolated data
+        if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
+            # store this window as a sample by timestep and position
+            samples[(gd.timestamp, (x,y))] = interp_window
+
+    return samples
+
+
 # swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
@@ -176,7 +243,7 @@ normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    path = 'data/satellite/raw/gsipL3_g13_GENHEM_2013121_1', 
+    path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_2013121_1', 
     window_shape = (3,3), # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
@@ -242,52 +309,33 @@ def main(
         rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
     print 'processing files from %s' % path
-    
+
+    part_parse_nc = functools.partial(parse_nc,
+                     inputs = inputs, 
+                     lat_range = lat_range, 
+                     lon_range = lon_range, 
+                     interp_buffer = interp_buffer, 
+                     n_channels = n_channels, 
+                     n_lat_cells = n_lat_cells, 
+                     n_lon_cells = n_lon_cells,
+                     n_wind_cells = n_wind_cells,
+                     lat_grid = lat_grid,
+                     lon_grid = lon_grid,
+                     rad_lat_min = rad_lat_min,
+                     rad_lon_min = rad_lon_min,
+                     dlat = dlat,
+                     dlon = dlon,
+                     sample_stride = sample_stride,
+                     dens_thresh = dens_thresh,
+                     window_shape = window_shape)
+
+    pool = mp.Pool(mp.cpu_count())
+    dicts = pool.map_async(part_parse_nc, paths).get()
     samples = {}
-    for j, p in enumerate(paths):
+    map(lambda x: samples.update(x), dicts)
+                                     
+    assert len(samples) > 0
 
-        print 'file number: ', j 
-        
-        # data from the given netcdf file
-        gd = GoesData(p, inputs, lat_range, lon_range, interp_buffer)
-
-        interp_data = numpy.ones((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
-        # perform interpolation for each input
-        for i, inp in enumerate(inputs):
-            not_missing = gd.frame.dropna(how='any', subset=[inp])
-            #print 'length of clean points for %s: ' % inp, len(not_missing)
-            
-            if len(not_missing) > 0:
-                lat = not_missing['lat_rad'].values
-                lon = not_missing['lon_rad'].values
-                val = not_missing[inp].values
-                    
-                interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
-
-        # drop grid cells missing any of the inputs
-        gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
-        gd.frame['lon_ind'] = numpy.floor((gd.frame['lon_rad'] - rad_lon_min) / dlon).astype(int)
-        grp = gd.frame.groupby(['lat_ind', 'lon_ind'])
-        grid = grp.aggregate(numpy.mean)
-        grid.reset_index(inplace = True)
-        grid = grid.dropna(how = 'any', subset = inputs)
-        
-        # for each window position given stride length
-        for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
-                               numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
-
-            lat_ind = grid['lat_ind']
-            lon_ind = grid['lon_ind']
-            present = grid[ (lat_ind >= x) & (lat_ind < (x + window_shape[0])) &
-                            (lon_ind >= y) & (lon_ind < (y + window_shape[1])) ]
-
-            interp_window = interp_data[:,x:x+window_shape[0], 
-                                          y:y+window_shape[1]]
-            # if density of observed data is high enough and there are no nans in the interpolated data
-            if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
-                # store this window as a sample by timestep and position
-                samples[(gd.timestamp, (x,y))] = interp_window
-                                                        
     # convert samples dict to DataFrame
     samp_keys = samples.keys()
     datetimes = [k[0] for k in samp_keys]
@@ -302,11 +350,15 @@ def main(
     d_time = pandas.DateOffset(hours = delta_time)
 
     center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+
+    # sample_gb = sample_df.groupby(['position'])
     
     print 'finding neighboring frames of time-length %i' % (n_frames + 1)
     # for all one time step samples find neighboring times with same location      
     windows = None; targets = None; timestamps = None
     for i in sample_df.index:
+
+        print 'row %i of %i' % (i, len(sample_df.index))
         
         row = sample_df.iloc[i]
         dt = row['datetime']
@@ -338,6 +390,11 @@ def main(
                 timestamps = numpy.append(timestamps, times[None,:], axis = 0)
                 
                 assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] # XXX keep?
+    
+    if windows is None:
+        print 'no consecutive frames found'
+        print datetimes
+        assert False
 
     stats = numpy.zeros((n_channels,2)); stats[:,1] = 1.
     if normalized:
