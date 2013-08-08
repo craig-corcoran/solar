@@ -224,61 +224,54 @@ def parse_nc(
 
     return samples
 
-def split_loc_samples(data_frame, n_frames, delta_time):
-    ''' remove data not usable for any sample of length n_frames and return 
-    sorted data frame, delta_time mask, and the sample indices'''
-    # n_frames here is the total length of frames used for sample, ie n_lags+1
-    
-    d_time = pandas.DateOffset(hours = delta_time)
-    window_shape = data_frame['array'][0].shape
-    center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape):
+    ''' find sequences of n_frames + 1 with delta_time (in hours) between each 
+    frame. The last frame's center pixel is used as the target value'''
 
-    # get rid  of sections of insufficient length to be used for samples
-    data_frame.sort('datetime')
-    times = data_frame['datetime']
-    mask = (times[:-1].values - times[1:].values) == d_time
-    
-    # jumps are the indices where change in time is not d_time
-    jumps = numpy.negative(mask).nonzero()[0] 
-    jumps = numpy.append(numpy.insert(jumps,0,-1), len(times)-1)
-    sections = jumps[1:] - jumps[:-1]
-    
-    assert sum(sections) == len(times)
-    
-    keep = numpy.zeros(len(times)).astype(bool)
-    for i,s in enumerate(sections):
-        if s >= n_frames:
-            keep[jumps[i]+1:jumps[i+1]+1] = True
-    
-    print 'keep all? ', (keep == True).all()
-
-    data_frame = data_frame[keep]
+    #loc_inds, data_frame = group # currently loc_inds not used
     data_frame.reset_index(inplace = True)
     
-    times = data_frame['datetime']
-    mask = (times[:-1].values - times[1:].values) == d_time
-    
-    indices = []
-    for i in xrange(len(mask)):
-        if (mask[i:i+n_frames] == True).all():
-            indices.append(numpy.arange(i,i+n_frames)) # xxx not super efficient
-    
-    indices = numpy.array(indices)
-    
-    n_lags = n_frames - 1
-    
-    # xxx effificent to do list comprehension then make into array?
-    windows = numpy.array([data_frame['array'].values[inds[0:n_lags]] for inds in indices])
-    targets = numpy.array([data_frame['array'].values[inds[n_lags]][center_ind] for inds in indices])
-    # datetimes correspond to target value times
-    dates = numpy.array([data_frame['datetime'].values[inds[n_lags]]]) 
+    d_time = pandas.DateOffset(hours = delta_time)
+    n_wind_cells = window_shape[0]*window_shape[1]
+    center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+    datetimes = data_frame['datetime']
 
-    assert windows.shape[0] == targets.shape[0] == dates.shape[0]
+    windows = None; targets = None; timestamps = None
+    for i in data_frame.index:
 
-    return (data_frame, indices, mask), (windows, targets, dates)
+        #print 'row %i of %i' % (i, len(sample_df.index))
+        
+        row = data_frame.iloc[i]
+        time = row['datetime']
+        
+        mask = numpy.zeros(len(datetimes), dtype=bool)
+        for t in xrange(n_frames):
+            mask = mask | (datetimes == (time+(t+1)*d_time))
+            
+        next_rows = data_frame[mask]
+        if len(next_rows) == (n_frames): # if there are n_frames valid frames
+            next_rows.sort('datetime')
+            winds = numpy.empty((n_frames, n_channels, n_wind_cells))
+            winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
 
-# XXX what if desired time span is not min delta time?
+            # flatten all but the last frame, the last used for target
+            for w in xrange(n_frames-1): 
+                winds[w+1] = numpy.reshape(next_rows.iloc[w]['array'], (n_channels, n_wind_cells)) 
+            
+            times = numpy.append([time], next_rows['datetime'])
 
+            if windows is None:
+                windows = winds[None,:,:,:]
+                targets = next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]]
+                timestamps = times[None,:]
+            else:
+                windows = numpy.append(windows, winds[None,:,:,:], axis = 0)
+                targets = numpy.append(targets, next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]], axis = 0)
+                timestamps = numpy.append(timestamps, times[None,:], axis = 0)
+                
+                assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] # XXX keep?
+    
+    return windows, targets, timestamps
 
 
 # swd, frac_ice/water/total, tau, olr, 
@@ -366,7 +359,7 @@ def main(
     
     print 'processing files from %s' % path
 
-    part_parse_nc = functools.partial(parse_nc,
+    part_parse_nc = functools.partial(parse_nc, # xxx make number of params smaller?
                      inputs = inputs, 
                      lat_range = lat_range, 
                      lon_range = lon_range, 
@@ -389,7 +382,7 @@ def main(
     dicts = pool.map_async(part_parse_nc, paths).get()
     samples = {}
     map(lambda x: samples.update(x), dicts)
-                                     
+    
     assert len(samples) > 0
 
     # convert samples dict to DataFrame
@@ -400,83 +393,72 @@ def main(
     sample_df = pandas.DataFrame({'datetime':datetimes, 
                                 'position':positions, 
                                 'array' : arrays})
+    
+    print 'finding neighboring frames of time-length %i with delta time %0.1f hours' % (n_frames + 1, float(delta_time))
 
     sample_gb = sample_df.groupby(['position']) 
 
-
-
-    for name, group 
-    
-    print 'finding neighboring frames of time-length %i' % (n_frames + 1)
-    # for all one time step samples find neighboring times with same location      
-    windows = None; targets = None; timestamps = None
-    for i in sample_df.index:
-
-        print 'row %i of %i' % (i, len(sample_df.index))
+    class SampleSet(object):
         
-        row = sample_df.iloc[i]
-        dt = row['datetime']
-        pos = row['position']
-        
-        mask = numpy.zeros(len(datetimes), dtype=bool)
-        for t in xrange(n_frames):
-            mask = mask | (datetimes == (dt+(t+1)*d_time))
+        def __init__(self):
             
-        next_rows = sample_df[mask & (positions == pos)]
-        if len(next_rows) == (n_frames): # if there are n_frames valid frames
-            next_rows.sort('datetime')
-            winds = numpy.empty((n_frames, n_channels, n_wind_cells))
-            winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
+            self.windows = None
+            self.targets = None
+            self.timestamps = None
 
-            # flatten all but the last frame, the last used for target
-            for w in xrange(n_frames-1): 
-                winds[w+1] = numpy.reshape(next_rows.iloc[w]['array'], (n_channels, n_wind_cells)) 
+        def append_sample(self, sample_tuple):
+            winds, targs, times = sample_tuple
+            assert winds.ndim == 4 # (n_samples, n_frames, n_channels, n_wind_cells) 
+            assert targs.ndim == 2 # (n_samples, n_channels)
+            assert times.ndim == 2 # (n_samples, n_frames) XXX keep?
             
-            times = numpy.append([dt], next_rows['datetime'])
+            if winds.shape[0] > 0:
+                if self.windows is None:
+                    self.windows = winds
+                    self.targets = targs
+                    self.timestamps = times
+                else:
+                    self.windows = numpy.append(self.windows, winds, axis = 0)
+                    self.targets = numpy.append(self.targets, targs, axis = 0)
+                    self.timestamps = numpy.append(self.timestamps, times, axis = 0)
 
-            if windows is None:
-                windows = winds[None,:,:,:]
-                targets = next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]]
-                timestamps = times[None,:]
-            else:
-                windows = numpy.append(windows, winds[None,:,:,:], axis = 0)
-                targets = numpy.append(targets, next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]], axis = 0)
-                timestamps = numpy.append(timestamps, times[None,:], axis = 0)
-                
-                assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] # XXX keep?
+    sample_set = SampleSet()
     
-    if windows is None:
-        print 'no consecutive frames found'
-        print datetimes
-        assert False
+    for name, group in sample_gb:
+        pool.apply_async(split_loc_samples, args = [group, n_frames, n_channels, delta_time, window_shape], 
+            callback = sample_set.append_sample)
+    pool.close() # XXX needed?
+    pool.join()
+
+    print sample_set.windows.shape
 
     stats = numpy.zeros((n_channels,2)); stats[:,1] = 1.
-    if normalized:
+    if normalized: 
         print 'normalizing the data'
         # normalize the data (only using windows, ignoring targets currently)
         for i in xrange(n_channels):
-            mn = numpy.mean(windows[:,:,i,:])
-            std = numpy.std(windows[:,:,i,:])
+            mn = numpy.mean(sample_set.windows[:,:,i,:])
+            std = numpy.std(sample_set.windows[:,:,i,:])
             stats[i,:] = [mn, std]
             
-            windows[:,:,i,:] = windows[:,:,i,:] - mn
-            windows[:,:,i,:] = windows[:,:,i,:] / std
+            sample_set.windows[:,:,i,:] = sample_set.windows[:,:,i,:] - mn
+            sample_set.windows[:,:,i,:] = sample_set.windows[:,:,i,:] / std
 
-            targets[:,i] = targets[:,i] - mn
-            targets[:,i] = targets[:,i] / std
+            sample_set.targets[:,i] = sample_set.targets[:,i] - mn
+            sample_set.targets[:,i] = sample_set.targets[:,i] / std
             
             print inputs[i], ': '
             print 'window mean: ', mn
             print 'window std: ', std
-            print 'target mean after normalization: ', numpy.mean(targets[:,i])
-            print 'target std after normalization: ', numpy.std(targets[:,i])
-
+            print 'target mean after normalization: ', numpy.mean(sample_set.targets[:,i])
+            print 'target std after normalization: ', numpy.std(sample_set.targets[:,i])
+    
     # windows is shape (n_samples, n_frames, n_channels, n_wind_cells)
     dataset = {
-              'input':windows, 
-              'target':targets, 
-              'datetimes':timestamps,
-              'names':inputs, 
+              'windows': sample_set.windows,
+              'targets': sample_set.targets,
+              'timestamps': sample_set.timestamps,
+              'input-names':inputs, 
               'norm-stats': stats,
               'n-frames':n_frames,
               'n-channels':n_channels,
@@ -491,14 +473,14 @@ def main(
               'normalized':normalized,
               'data-path':path
               }
-
-    print 'number of samples collected: ', windows.shape[0]
+    
+    n_samples = sample_set.windows.shape[0]
+    print 'number of samples collected: ', n_samples
     print 'saving to file'
 
     with openz('data/satellite/processed/goes-insolation.nf-%i.nc-%i.ws-%i.str-%i.dth-%s.nsamp-%i.pickle.gz' % 
-            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), windows.shape[0]), 'wb') as pfile:
+            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), n_samples), 'wb') as pfile:
         pickle.dump(dataset, pfile)
-
 
 if __name__ == '__main__':
     plac.call(main)
