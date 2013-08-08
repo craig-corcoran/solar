@@ -224,6 +224,62 @@ def parse_nc(
 
     return samples
 
+def split_loc_samples(data_frame, n_frames, delta_time):
+    ''' remove data not usable for any sample of length n_frames and return 
+    sorted data frame, delta_time mask, and the sample indices'''
+    # n_frames here is the total length of frames used for sample, ie n_lags+1
+    
+    d_time = pandas.DateOffset(hours = delta_time)
+    window_shape = data_frame['array'][0].shape
+    center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+
+    # get rid  of sections of insufficient length to be used for samples
+    data_frame.sort('datetime')
+    times = data_frame['datetime']
+    mask = (times[:-1].values - times[1:].values) == d_time
+    
+    # jumps are the indices where change in time is not d_time
+    jumps = numpy.negative(mask).nonzero()[0] 
+    jumps = numpy.append(numpy.insert(jumps,0,-1), len(times)-1)
+    sections = jumps[1:] - jumps[:-1]
+    
+    assert sum(sections) == len(times)
+    
+    keep = numpy.zeros(len(times)).astype(bool)
+    for i,s in enumerate(sections):
+        if s >= n_frames:
+            keep[jumps[i]+1:jumps[i+1]+1] = True
+    
+    print 'keep all? ', (keep == True).all()
+
+    data_frame = data_frame[keep]
+    data_frame.reset_index(inplace = True)
+    
+    times = data_frame['datetime']
+    mask = (times[:-1].values - times[1:].values) == d_time
+    
+    indices = []
+    for i in xrange(len(mask)):
+        if (mask[i:i+n_frames] == True).all():
+            indices.append(numpy.arange(i,i+n_frames)) # xxx not super efficient
+    
+    indices = numpy.array(indices)
+    
+    n_lags = n_frames - 1
+    
+    # xxx effificent to do list comprehension then make into array?
+    windows = numpy.array([data_frame['array'].values[inds[0:n_lags]] for inds in indices])
+    targets = numpy.array([data_frame['array'].values[inds[n_lags]][center_ind] for inds in indices])
+    # datetimes correspond to target value times
+    dates = numpy.array([data_frame['datetime'].values[inds[n_lags]]]) 
+
+    assert windows.shape[0] == targets.shape[0] == dates.shape[0]
+
+    return (data_frame, indices, mask), (windows, targets, dates)
+
+# XXX what if desired time span is not min delta time?
+
+
 
 # swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
@@ -344,14 +400,12 @@ def main(
     sample_df = pandas.DataFrame({'datetime':datetimes, 
                                 'position':positions, 
                                 'array' : arrays})
-    
-    datetimes = sample_df['datetime']
-    positions = sample_df['position']
-    d_time = pandas.DateOffset(hours = delta_time)
 
-    center_ind = (numpy.ceil(window_shape[0]/2.), numpy.ceil(window_shape[1]/2.))
+    sample_gb = sample_df.groupby(['position']) 
 
-    # sample_gb = sample_df.groupby(['position'])
+
+
+    for name, group 
     
     print 'finding neighboring frames of time-length %i' % (n_frames + 1)
     # for all one time step samples find neighboring times with same location      
