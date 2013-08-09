@@ -16,6 +16,9 @@ from solar.util import openz
 # XXX store non-spatial parameters separately?
 
 class GoesData(object):
+
+    ''' represents a single NetCDF (.nc) file with utilities to rescale the data
+    into the native units and parse into a pandas dataframe'''
     
     def __init__(self, path, inputs, lat_range = None, lon_range = None, 
                 interp_buffer = None, use_masked = True):
@@ -28,21 +31,14 @@ class GoesData(object):
         # read netcdf file into pandas data frame
         self.frame, self.meta = self.nc_to_frame(path, use_masked = use_masked) # removes all but lat, lon, inputs, and datetime
 
-        # add datetime column
-        self.frame['datetime'] = self.convert_to_datetime(
-                                            self.frame['img_date'].values,
-                                            self.frame['img_time'].values)
-        assert (self.frame['datetime'].values == self.frame['datetime'].values[0]).all() # XXX
-        self.timestamp = self.frame['datetime'].iloc[0]#[:13]
-        #self.frame = self.frame.sort('datetime')
-        
+        self.timestamp = self.convert_to_datetime(
+                                            self.frame['img_date'].values[0],
+                                            self.frame['img_time'].values[0])
         self.rescale()
         
 
     def rescale(self):
-        '''rescale by units in metadata, center and set variance to unity, 
-        stores mean and std for applying the same scaling or un-scaling later) 
-        '''
+        '''rescale by units in metadata'''
 
         # convert lat to 0 to pi and lon to 0 to 2pi
         self.frame['lat_rad'], self.frame['lon_rad'] = self.latlon_to_thetaphi(
@@ -57,22 +53,16 @@ class GoesData(object):
                 scal = float(mvar['RANGE_MAX'] - mvar['RANGE_MIN']) / float(mvar['SCALED_MAX'] - mvar['SCALED_MIN'])
                 self.frame[inp] = (var * scal) + mvar['RANGE_MIN']
 
-    # XXX unscale
-    # convert theta/phi to lat/lon
+    @staticmethod
+    def thetaphi_to_latlon(theta, phi):
+        theta = theta * (180./numpy.pi) - 90.
+        phi = phi * (180./numpy.pi) - 180.
+        return theta, phi
 
     @staticmethod
     def latlon_to_thetaphi(lat, lon):
-        # convert lat to 0 to pi
-        lat = (lat+90.)*(numpy.pi/180.)
-
-        # convert lon to 0 to 2pi
-        lon = copy.deepcopy(lon)
-        if (type(lon) == int) or (type(lon) == float):
-            lon = lon + 360. if lon < 0 else lon
-        else:
-            lon[lon < 0] = lon[lon < 0] + 360.
-        lon = lon * (numpy.pi/180.)
-
+        lat = (lat + 90. ) * (numpy.pi/180.) # convert lat to 0 to pi
+        lon = (lon + 180.) * (numpy.pi/180.) # convert lon to 0 to 2pi
         return lat, lon
     
     def nc_to_frame(self, path, use_masked = False): # xxx make static method with all inputs?
@@ -140,26 +130,21 @@ class GoesData(object):
         elif type(arr) is numpy.ndarray:
             return arr.T, None
     
-    # XXX doesn't need to be different for different samples; one file = one goes data
     def convert_to_datetime(self, img_date, img_time):
-        ''' convert from two arrays of date and time in GOES NetCDF format to 
-        pandas datetime '''
-        n_pts = len(img_date)
-        date = map(lambda x: str(int(x)), img_date)
-        year = map(lambda x: 1900 + int(x[:3]), date)
-        jday = map(lambda x: int(x[3:]), date) # number of days since new year
-        dts = [pandas.datetime.fromordinal(
-                        pandas.datetime(year[i], 1, 1).toordinal() + jday[i]) 
-                        for i in xrange(n_pts)]
+        ''' convert from date and time in GOES NetCDF format to pandas datetime 
+        '''
+        date = str(int(img_date))
+        year = 1900 + int(date[:3])
+        jday = int(date[3:])
+        datetime = pandas.datetime.fromordinal(
+                                pandas.datetime(year,1,1).toordinal() + jday)
         # add hour to datetime
         hour = (img_time / 10000).astype(int)
-        return [pandas.datetime(
-                            dts[i].year, 
-                            dts[i].month, 
-                            dts[i].day, 
-                            hour[i]) for i in xrange(n_pts)]
-
-
+        return pandas.datetime(
+                            datetime.year, 
+                            datetime.month, 
+                            datetime.day, 
+                            hour) 
 
 def parse_nc(
              path, 
@@ -269,7 +254,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
                 targets = numpy.append(targets, next_rows.iloc[-1]['array'][None,:,center_ind[0],center_ind[1]], axis = 0)
                 timestamps = numpy.append(timestamps, times[None,:], axis = 0)
                 
-                assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] # XXX keep?
+                assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] 
     
     return windows, targets, timestamps
 
@@ -357,7 +342,7 @@ def main(
         rad_lat_min : rad_lat_max : n_lat_cells*1j,
         rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
-    print 'processing files from %s' % path
+    print 'processing files from ', path
 
     part_parse_nc = functools.partial(parse_nc, # xxx make number of params smaller?
                      inputs = inputs, 
@@ -377,12 +362,10 @@ def main(
                      sample_stride = sample_stride,
                      dens_thresh = dens_thresh,
                      window_shape = window_shape)
-
-    pool = mp.Pool(mp.cpu_count())
-    dicts = pool.map_async(part_parse_nc, paths).get()
-    samples = {}
-    map(lambda x: samples.update(x), dicts)
     
+    pool = mp.Pool(mp.cpu_count())
+    samples = {}
+    pool.map_async(part_parse_nc, paths, callback = lambda x: samples.update(x))
     assert len(samples) > 0
 
     # convert samples dict to DataFrame
@@ -410,7 +393,7 @@ def main(
             winds, targs, times = sample_tuple
             assert winds.ndim == 4 # (n_samples, n_frames, n_channels, n_wind_cells) 
             assert targs.ndim == 2 # (n_samples, n_channels)
-            assert times.ndim == 2 # (n_samples, n_frames) XXX keep?
+            assert times.ndim == 2 # (n_samples, n_frames) 
             
             if winds.shape[0] > 0:
                 if self.windows is None:
@@ -425,12 +408,13 @@ def main(
     sample_set = SampleSet()
     
     for name, group in sample_gb:
-        pool.apply_async(split_loc_samples, args = [group, n_frames, n_channels, delta_time, window_shape], 
-            callback = sample_set.append_sample)
-    pool.close() # XXX needed?
+        pool.apply_async(split_loc_samples, 
+                args = [group, n_frames, n_channels, delta_time, window_shape], 
+                callback = sample_set.append_sample)
+    pool.close() 
     pool.join()
 
-    print sample_set.windows.shape
+    print 'sample input shape: ', sample_set.windows.shape
 
     stats = numpy.zeros((n_channels,2)); stats[:,1] = 1.
     if normalized: 
@@ -478,8 +462,8 @@ def main(
     print 'number of samples collected: ', n_samples
     print 'saving to file'
 
-    with openz('data/satellite/processed/goes-insolation.nf-%i.nc-%i.ws-%i.str-%i.dth-%s.nsamp-%i.pickle.gz' % 
-            (n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), n_samples), 'wb') as pfile:
+    with openz('data/satellite/processed/goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-%i.dth-%s.nsamp-%i.pickle.gz' % 
+            (delta_time, n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), n_samples), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
 if __name__ == '__main__':
