@@ -176,12 +176,14 @@ def parse_nc(
         not_missing = gd.frame.dropna(how='any', subset=[inp])
         #print 'length of clean points for %s: ' % inp, len(not_missing)
         
-        if len(not_missing) > 0:
+        if len(not_missing) > 4:
             lat = not_missing['lat_rad'].values
             lon = not_missing['lon_rad'].values
             val = not_missing[inp].values
-                
-            interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+            try:
+                interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+            except Exception as e:
+                print e
 
     # drop grid cells missing any of the inputs
     gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
@@ -204,7 +206,7 @@ def parse_nc(
                                       y:y+window_shape[1]]
         # if density of observed data is high enough and there are no nans in the interpolated data
         if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
-            # store this window as a sample by timestep and position
+            # store this window as a sample by times    tep and position
             samples[(gd.timestamp, (x,y))] = interp_window
 
     return samples
@@ -277,8 +279,8 @@ normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_2013121_1', 
-    window_shape = (3,3), # (n_lat, n_lon)
+    path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
+    window_shape = (11,11), # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     lat_range = (34., 38.),
     lon_range = (-100., -96.), #oklahoma
