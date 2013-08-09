@@ -1,4 +1,8 @@
+import datetime
 import numpy
+import glob
+import plac
+import pandas
 import cPickle as pickle
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
@@ -26,7 +30,7 @@ class NeutralPredictor(object):
 
 class ARmodel(NeutralPredictor):
     
-    def __init__(self, input_array, target_array, l2reg = 0.4, center = True):
+    def __init__(self, input_array, target_array, l2reg = 0., center = True):
         
         self.n_samples = input_array.shape[0]
 
@@ -92,42 +96,163 @@ def crossval(model, inputs, targets, n_folds, center):
     return test_error / float(n_folds), train_error / float(n_folds), weights / float(n_folds)
 
 
-def main(
-    data_path = 'solar/data/processed/goes-insolation.nf-1.nc-3.ws-9.str-2.dth-0.6.pickle.gz',
+def test_models(
+    data_dir = 'data/satellite/processed/',
+    target_channel = 'swd_sfc',
     n_folds = 10,
+    size = 9,
+    n_frames = 1,
+    delta_time = 1., # in hours
+    n_channels = 3,
     center = True):
 
-    with openz(data_path) as data_file:
+    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.pickle.gz' % 
+            (delta_time, n_frames, n_channels, size))
+
+    assert len(paths) > 0
+
+    print 'matching files: ', paths
+    print 'using first: ', paths[0]
+
+    with openz(paths[0]) as data_file:
         dataset = pickle.load(data_file)
     
-    targets = dataset['target']
+    input_names = dataset['input-names']
+    target_index = input_names.index(target_channel)
+    targets = dataset['target'][:,target_index]
     inputs  = dataset['input']
-    mn,std = dataset['stats'][-1,:]
+    mn,std = dataset['stats'][target_index,:]
     
-    n_samples, n_frames, n_channels, n_dims = inputs.shape
-    side = numpy.sqrt(n_dims).astype(int)
+    n_samples, nf, nc, n_dims = inputs.shape
+    assert nf == n_frames
+    assert nc == n_channels
+    assert size**2 == n_dims
 
     ar_test_error, ar_train_error, ar_weight_avg = crossval(ARmodel, inputs, targets, n_folds, center)
-    np_test_error, np_train_error,_ = crossval(NeutralPredictor, inputs, targets, n_folds, center)
-    
-    # XXX store target labels
-    if center:
-        print 'learned constant bias: ', ar_weight_avg[-1,-1]
+    np_test_error, np_train_error, _ = crossval(NeutralPredictor, inputs, targets, n_folds, center)
 
-    print 'number of frames: ', n_samples
-    print 'number of channels: ', n_channels
-    print 'number of spatial dimensions: ', n_dims
-    print 'number of parameters: ', n_channels * n_dims * n_frames
-    print 'number of samples: ', n_samples, '\n'
-    print '%i fold crossval' %n_folds
-    print 'AR test error: ', ar_test_error * std + mn
-    print 'AR train error: ', ar_train_error * std + mn
-    print 'Neutral test error: ', np_test_error * std + mn
-    print 'Neutral train error: ', np_train_error * std + mn, '\n'
-    print '% improvement in test error: ', 100.*(np_test_error-ar_test_error) / np_test_error
-    print '% improvement in train error: ', 100.*(np_train_error-ar_train_error) / np_train_error
+    ar_test_error = ar_test_error * std
+    ar_train_error = ar_train_error * std
+    np_test_error = np_test_error * std
+    np_train_error = np_train_error * std
+
+    return ar_test_error, ar_train_error, np_test_error, np_train_error
+
+def performance_tests(
+                     def_size = 11,
+                     def_n_frames = 1,
+                     def_delta_time = 1.,
+                     def_n_channels = 3,
+                     sizes = [3,5,7],
+                     num_frames = [2,3,4],
+                     delta_times = [3.,6.,12.]
+                     ):
+
+    df = pandas.DataFrame(columns = ['ar-test-error', 
+                                     'ar-train-error', 
+                                     'np-test-error', 
+                                     'np-train-error',
+                                     'window-size',
+                                     'n-frames',
+                                     'delta-time',
+                                     'n-channels'])
+
+    def run_experiment(size, n_frames, delta_time, n_channels):
+        ar_test, ar_train, np_test, np_train = test_models(
+                                                          size = size,
+                                                          n_frames = n_frames,
+                                                          delta_time = delta_time,
+                                                          n_channels = n_channels
+                                                          )
+        df.append({'ar-test-error' : ar_test,
+                   'ar-train-error': ar_train,
+                   'np-test-error' : np_test,
+                   'np-train-error': np_train,
+                   'window-size' : size,
+                   'n-frames' : n_frames,
+                   'delta-time' : delta_time,
+                   'n-channels' : n_channels}, ignore_index = True)
+
+
+    # vary window size
+    for size in sizes:
+        run_experiment(
+                      size = size, 
+                      n_frames = def_n_frames, 
+                      delta_time = def_delta_time, 
+                      n_channels = def_n_channels
+                      )
+                                                          
+    # vary number of frames
+    for nf in num_frames:
+        run_experiment(
+                      size = def_size, 
+                      n_frames = nf, 
+                      delta_time = def_delta_time, 
+                      n_channels = def_n_channels
+                      )
+
+    # vary forecast interval with two different window sizes
+    for dt in delta_times:
+        run_experiment(
+                      size = def_size, 
+                      n_frames = def_n_frames, 
+                      delta_time = dt, 
+                      n_channels = def_n_channels
+                      )
     
-    wt_img = ar_weight_avg[:-1,-1] if center else ar_weight_avg[:,-1]
+        # change window size to larger than default
+        run_experiment(
+                      size = 19, 
+                      n_frames = def_n_frames, 
+                      delta_time = dt, 
+                      n_channels = def_n_channels
+                      )
+    timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
+    df.to_csv('data/satellite/output/ar_performance_tests%s.csv' % timestamp)
+
+def plot_performance(data_dir = 'data/satellite/output/'):
+    
+    paths = glob.glob(data_dir + 'ar_performance_tests*.csv')
+    sorted(paths)
+    df = pandas.read_csv(paths[-1]) # read most recent results
+    
+    # performance v window size
+    plt.subplot(311,1)
+    gb = df.groupby(['n-frames','delta-time','n-channels'])
+    for indx, group in gb:
+        plt.plot(df['window-size'], df['ar-test-error'], label = str(indx)+' AR test') 
+        plt.plot(df['window-size'], df['ar-train-error'], label = str(indx)+' AR train')
+        plt.plot(df['window-size'], df['np-test-error'], label = str(indx)+' NP test')
+        plt.plot(df['window-size'], df['np-train-error'], label = str(indx)+' NP train')
+    plt.legend()
+    
+    # performance v number of frames
+    plt.subplot(311,2)
+    gb = df.groupby(['window-size','delta-time','n-channels'])
+    for indx, group in gb:
+        plt.plot(df['n-frames'], df['ar-test-error'], label = str(indx)+' AR test') 
+        plt.plot(df['n-frames'], df['ar-train-error'], label = str(indx)+' AR train') 
+        plt.plot(df['n-frames'], df['np-test-error'], label = str(indx)+' NP test') 
+        plt.plot(df['n-frames'], df['np-train-error'], label = str(indx)+' NP train') 
+    plt.legend()
+    
+    # performance v forecast interval (delta time)
+    plt.subplot(311,3)
+    gb = df.groupby(['window-size','n-frames','n-channels'])
+    for indx, group in gb:
+        plt.plot(df['delta-time'], df['ar-test-error'], label = str(indx)+' AR test') 
+        plt.plot(df['delta-time'], df['ar-train-error'], label = str(indx)+' AR train')
+        plt.plot(df['delta-time'], df['np-test-error'], label = str(indx)+' NP test')
+        plt.plot(df['delta-time'], df['np-train-error'], label = str(indx)+' NP train')
+    plt.legend()
+
+    plt.savefig(paths[-1][:-4] + '.png')
+
+
+def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = True):
+    
+    wt_img = weight[:-1,-1] if center else weight[:,-1]
     wt_img = numpy.reshape(wt_img, (n_frames, n_channels, n_dims))
 
     vmin = numpy.min(wt_img)
@@ -145,16 +270,15 @@ def main(
         for i in xrange(n_channels):
             ind = n_frames*t+i
             im = grid[ind].imshow(
-                                 numpy.reshape(wt_img[t,i,:], (side,side)), 
+                                 numpy.reshape(wt_img[t,i,:], (size,size)), 
                                  vmin = vmin, vmax = vmax,
                                  origin = 'lower',
                                  interpolation = 'nearest'
                                  )
-            grid[ind].title.set_text(dataset['names'][i])
+            grid[ind].title.set_text(names[i])
                 
     grid.cbar_axes[0].colorbar(im) #, format='%.2f')
-    plt.savefig('ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, side))
-
+    plt.savefig('ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, size))
 
 if __name__ == '__main__':
-    main()
+    plac.call(performance_tests)
