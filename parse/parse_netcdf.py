@@ -167,6 +167,7 @@ def parse_nc(
              window_shape
              ):
 
+    #print 'parsing', path
     samples = {}
     
     gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer)
@@ -204,6 +205,7 @@ def parse_nc(
 
         interp_window = interp_data[:,x:x+window_shape[0], 
                                       y:y+window_shape[1]]
+        # XXX best way to determine observation density?
         # if density of observed data is high enough and there are no nans in the interpolated data
         if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
             # store this window as a sample by times    tep and position
@@ -214,8 +216,9 @@ def parse_nc(
 def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape):
     ''' find sequences of n_frames + 1 with delta_time (in hours) between each 
     frame. The last frame's center pixel is used as the target value'''
+    
+    #print 'parsing location frame'
 
-    #loc_inds, data_frame = group # currently loc_inds not used
     data_frame.reset_index(inplace = True)
     
     d_time = pandas.DateOffset(hours = delta_time)
@@ -265,8 +268,9 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
 #(help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
 path = ('path to netCDF (.nc) file', 'option', None, str),
-window_shape = ('2-tuple shape of sample grid window', 'option', None, None),
+window_size = ('2-tuple shape of sample grid window', 'option', None, int),
 n_frames = ('number of past timesteps into the past used for prediction', 'option', None, int),
+delta_time = ('difference in time between samples in hours', 'option', None, float),    
 lat_range = ('2-tuple of min and max latitudes to use for samples in degrees', 'option', None, None),
 lon_range = ('2-tuple of min and max longitudes to use for samples in degrees', 'option', None, None),
 dlat = ('delta latitude for interpolated grid', 'option', None, float),
@@ -274,22 +278,21 @@ dlon = ('delta longitude for interpolated grid', 'option', None, float),
 interp_buffer = ('2-tuple in degrees of buffer around lat/lon_range to include for interpolation', 'option', None, None),
 dens_thresh = ('fraction of full observation density that must be present for sample to be considered valid', 'option', None, float),
 sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, None),
-delta_time = ('difference in time between samples in hours', 'option', None, float),
 normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
     path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
-    window_shape = (11,11), # (n_lat, n_lon)
+    window_size = 9, # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
+    delta_time = 1., # in hours
     lat_range = (34., 38.),
     lon_range = (-100., -96.), #oklahoma
     dlat = 0.1,
     dlon = 0.1,
     interp_buffer = (2,2),
     dens_thresh = 0.6,
-    sample_stride = (2, 2),
-    delta_time = 1., # in hours
+    sample_stride = (1, 1),
     normalized = True,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
@@ -331,6 +334,7 @@ def main(
     dlat = dlat * numpy.pi / 180. # convert to radians
     dlon = dlon * numpy.pi / 180. 
     
+    window_shape = (window_size, window_size)
     # check that sample window is smaller than observation window
     assert (dlat * window_shape[0]) < lat_diff
     assert (dlon * window_shape[1]) < lon_diff
@@ -345,6 +349,11 @@ def main(
         rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
     print 'processing files from ', path
+    print 'window shape: ', window_shape
+    print 'delta time (hours): ', delta_time
+    print 'number of time lags: ', n_frames
+    print 'number of channels: ', n_channels
+
 
     part_parse_nc = functools.partial(parse_nc, # xxx make number of params smaller?
                      inputs = inputs, 
@@ -367,7 +376,8 @@ def main(
     
     pool = mp.Pool(mp.cpu_count())
     samples = {}
-    pool.map_async(part_parse_nc, paths, callback = lambda x: samples.update(x))
+    dicts = pool.map_async(part_parse_nc, paths).get()
+    map(samples.update, dicts)
     assert len(samples) > 0
 
     # convert samples dict to DataFrame
@@ -464,8 +474,8 @@ def main(
     print 'number of samples collected: ', n_samples
     print 'saving to file'
 
-    with openz('data/satellite/processed/goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-%i.dth-%s.nsamp-%i.pickle.gz' % 
-            (delta_time, n_frames, n_channels, window_shape[0], sample_stride[0], str(dens_thresh), n_samples), 'wb') as pfile:
+    with openz('data/satellite/processed/goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.pickle.gz' % 
+            (delta_time, n_frames, n_channels, window_shape[0], sample_stride[0], dens_thresh, n_samples), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
 if __name__ == '__main__':
