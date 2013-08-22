@@ -263,6 +263,23 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
     
     return windows, targets, timestamps
 
+def pickle_dat(i, dataset):
+    delta_time = dataset['dt']
+    n_frames = dataset['n-frames']
+    n_channels = dataset['n-channels']
+    _, nf, nc, n_wind_cells = dataset['windows'].shape
+    n_samples = dataset['n-samples'] 
+    window_size = numpy.sqrt(n_wind_cells).astype(int)
+    assert nf == n_frames
+    assert nc == n_channels
+    assert window_size**2 == n_wind_cells
+    sample_stride = dataset['sample-stride']
+    dens_thresh = dataset['dens-thresh']
+    
+    with openz('data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle.gz' % 
+            (delta_time, n_frames, n_channels, window_size, sample_stride[0], dens_thresh, n_samples, i), 'wb') as pfile:
+        pickle.dump(dataset, pfile)
+
 
 # swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
@@ -277,7 +294,7 @@ dlat = ('delta latitude for interpolated grid', 'option', None, float),
 dlon = ('delta longitude for interpolated grid', 'option', None, float),
 interp_buffer = ('2-tuple in degrees of buffer around lat/lon_range to include for interpolation', 'option', None, None),
 dens_thresh = ('fraction of full observation density that must be present for sample to be considered valid', 'option', None, float),
-sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, None),
+sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, int),
 normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
@@ -292,8 +309,9 @@ def main(
     dlon = 0.1,
     interp_buffer = (2,2),
     dens_thresh = 0.6,
-    sample_stride = (1, 1),
+    sample_stride = 1,
     normalized = True,
+    nper_file = 100000,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -334,6 +352,7 @@ def main(
     dlat = dlat * numpy.pi / 180. # convert to radians
     dlon = dlon * numpy.pi / 180. 
     
+    sample_stride = (sample_stride, sample_stride)
     window_shape = (window_size, window_size)
     # check that sample window is smaller than observation window
     assert (dlat * window_shape[0]) < lat_diff
@@ -448,35 +467,46 @@ def main(
             print 'window std: ', std
             print 'target mean after normalization: ', numpy.mean(sample_set.targets[:,i])
             print 'target std after normalization: ', numpy.std(sample_set.targets[:,i])
-    
+     
     # windows is shape (n_samples, n_frames, n_channels, n_wind_cells)
-    dataset = {
-              'windows': sample_set.windows,
-              'targets': sample_set.targets,
-              'timestamps': sample_set.timestamps,
-              'input-names':inputs, 
-              'norm-stats': stats,
-              'n-frames':n_frames,
-              'n-channels':n_channels,
-              'sample-stride':sample_stride,
-              'dens-thresh':dens_thresh,
-              'lat-range':lat_range,
-              'lon-range':lon_range,
-              'dlat':dlat,
-              'dlon':dlon,
-              'dt':delta_time,
-              'window-shape':window_shape,
-              'normalized':normalized,
-              'data-path':path
-              }
-    
+
     n_samples = sample_set.windows.shape[0]
+    n_files = numpy.ceil(n_samples / float(nper_file)).astype(int)
+    pool = mp.Pool(min(mp.cpu_count(), n_files))
+    
     print 'number of samples collected: ', n_samples
     print 'saving to file'
+    for i in xrange(n_files):
+        print 'file number: ', i
+        dataset = {
+                  'windows': sample_set.windows[i*nper_file:(i+1)*nper_file],
+                  'targets': sample_set.targets[i*nper_file:(i+1)*nper_file],
+                  'timestamps': sample_set.timestamps[i*nper_file:(i+1)*nper_file],
+                  'input-names': inputs, 
+                  'norm-stats': stats,
+                  'n-samples': n_samples,
+                  'n-frames': n_frames,
+                  'n-channels':n_channels,
+                  'sample-stride':sample_stride,
+                  'dens-thresh':dens_thresh,
+                  'lat-range':lat_range,
+                  'lon-range':lon_range,
+                  'dlat':dlat,
+                  'dlon':dlon,
+                  'dt':delta_time,
+                  'window-shape': window_shape,
+                  'normalized':normalized,
+                  'data-path':path
+                  }
+        print 'number of samples in file: ', dataset['windows'].shape[0]
+        assert dataset['windows'].shape[0] <= nper_file
+        pool.apply_async(pickle_dat, args = [i, dataset])
+        
+    pool.close()
+    pool.join()
+    print 'done'
+    
 
-    with openz('data/satellite/processed/goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.pickle.gz' % 
-            (delta_time, n_frames, n_channels, window_shape[0], sample_stride[0], dens_thresh, n_samples), 'wb') as pfile:
-        pickle.dump(dataset, pfile)
 
 if __name__ == '__main__':
     plac.call(main)

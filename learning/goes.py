@@ -1,9 +1,12 @@
+import re
+import copy
 import datetime
 import numpy
 import glob
 import plac
 import pandas
 import cPickle as pickle
+import multiprocessing as mp
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
 from solar.util import openz
@@ -11,16 +14,17 @@ from solar.util import openz
 
 class NeutralPredictor(object):
 
-    def __init__(self, input_array, target_array, center = None):
+    def __init__(self, input_array, target_array, center = None, target_index = -1):
         
         self.n_dims = input_array.shape[-1]
         self.theta = numpy.zeros(input_array.shape[1:])
         self.theta[-1,:,numpy.ceil(self.n_dims/2.)] = 1.
+        self.target_index = target_index
         
     def make_prediction(self, input_array):
         
-        assert input_array.ndim == 4
-        return input_array[:,-1,:,numpy.ceil(self.n_dims/2.)] # n_samples, n_frames, n_channels, n_dims
+        assert input_array.ndim == 4 # n_samples, n_frames, n_channels, n_dims
+        return input_array[:,-1,self.target_index,numpy.ceil(self.n_dims/2.)][:,None] 
 
     def test_prediction(self, input_array, target_array):
         
@@ -29,8 +33,9 @@ class NeutralPredictor(object):
                   axis=0)) 
 
 class ARmodel(NeutralPredictor):
-    
-    def __init__(self, input_array, target_array, l2reg = 0., center = True):
+    ''' Autoregressive model, takes input and target arrays and computes the 
+    least squares weight coefficients '''
+    def __init__(self, input_array, target_array, l2reg = 0., center = True, target_index = -1):
         
         self.n_samples = input_array.shape[0]
 
@@ -63,10 +68,16 @@ class ARmodel(NeutralPredictor):
 
         if self.center:
             input_array = numpy.hstack([input_array, numpy.ones((input_array.shape[0],1))])
-
+    
         return numpy.dot(input_array, self.theta)
+
+def test_model(model, train_inputs, train_targets, test_inputs, test_targets, center, target_index):
+    m = model(train_inputs, train_targets, center, target_index)
+    train_error = m.test_prediction(train_inputs, train_targets)
+    test_error = m.test_prediction(test_inputs, test_targets)
+    return test_error, train_error, m.theta
                           
-def crossval(model, inputs, targets, n_folds, center):
+def crossval(model, inputs, targets, n_folds, center, target_index):
     
     n_samp = inputs.shape[0]
     numpy.random.seed(0)
@@ -76,25 +87,49 @@ def crossval(model, inputs, targets, n_folds, center):
 
     if len(targets.shape) == 1:
         targets = targets[:,None]
-    test_error = numpy.zeros(targets.shape[1])
-    train_error = numpy.zeros(targets.shape[1])
-    weights = None
-
+    n_targets = targets.shape[1]
+    pool = mp.Pool(min(mp.cpu_count(), n_folds))
+    
+    class Errors(object):
+        
+        def __init__(self):
+            self.test_error = numpy.zeros(n_targets)
+            self.train_error = numpy.zeros(n_targets)
+            self.weights = None
+        
+        def accumulate_errors(self, inp):
+            #print 'accumulate error input: ', inp
+            ts_error, tr_error, wts = inp
+            self.test_error += ts_error
+            self.train_error += tr_error
+            self.weights = wts if self.weights is None else self.weights + wts
+    
+    errors = Errors()
     for f in xrange(n_folds):
-
+        
+        print 'fold number: ', f    
         ind_a = numpy.round(n_samp*f / float(n_folds)).astype(int)
-        ind_b = numpy.round(n_samp*(f+1) / float(n_folds)).astype(int)
+        ind_b = numpy.round(n_samp*(f+1) / float(   n_folds)).astype(int)
         mask = numpy.array([True]*n_samp)
         mask[ind_a:ind_b] = False
         not_mask = numpy.negative(mask)
         
-        m = model(inputs[mask], targets[mask], center = center)
-        train_error += m.test_prediction(inputs[mask], targets[mask])
-        test_error += m.test_prediction(inputs[not_mask], targets[not_mask])
-        weights = m.theta if weights is None else weights + m.theta
+        pool.apply_async(test_model, 
+                args = [model, inputs[mask], targets[mask], inputs[not_mask], targets[not_mask], center, target_index],
+                callback = errors.accumulate_errors)
+    pool.close()
+    pool.join()
 
-    return test_error / float(n_folds), train_error / float(n_folds), weights / float(n_folds)
+    assert not (errors.test_error == 0).all()
+    assert errors.weights is not None
 
+    return errors.test_error / float(n_folds), errors.train_error / float(n_folds), errors.weights / float(n_folds)
+
+def unpack_dataset(path):
+        with openz(path) as data_file:
+            ds = pickle.load(data_file)
+        print 'unpacked file: ', path
+        return ds  
 
 def test_models(
     data_dir = 'data/satellite/processed/',
@@ -105,36 +140,115 @@ def test_models(
     delta_time = 1., # in hours
     n_channels = 3,
     center = True):
-
-    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f-nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.pickle.gz' % 
+    
+    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.0.pickle.gz' % 
             (delta_time, n_frames, n_channels, size))
 
     assert len(paths) > 0
 
     print 'matching files: ', paths
     print 'using first: ', paths[0]
-
-    with openz(paths[0]) as data_file:
-        dataset = pickle.load(data_file)
     
-    input_names = dataset['input-names']
+    # find all files from the same batch
+    path = paths[0]
+    part = path[:-11] 
+    paths = glob.glob(part+'*.pickle.gz')
+
+    par_grp = re.match(
+        '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle\.gz',
+        path).groups()
+    n_frames, n_channels, wind_size, n_samples = map(int, par_grp)
+    n_wind_cells = wind_size**2
+    
+    class Dataset(object):
+        
+        def __init__(self, n_samples, n_frames, n_channels, n_wind_cells):
+            self.data = {}
+            self.n_frames = n_frames
+            self.n_channels = n_channels
+            self.inputs = numpy.zeros((n_samples, n_frames, n_channels, n_wind_cells)) * numpy.nan
+            self.targets = numpy.zeros((n_samples, n_channels)) * numpy.nan
+            self.timestamps = numpy.zeros((n_samples, n_frames+1), dtype = object) * numpy.nan        
+            self.i = 0
+
+        def accumulate(self, ds):
+            if self.i == 0:
+                print 'first accumulate'
+                self.data = copy.deepcopy(ds)
+                self.data['windows'] = self.inputs
+                self.data['targets'] = self.targets
+                self.data['timestamps'] = self.timestamps
+            else:
+                print 'not first accumulate'
+                # assert parameters are consistent across batch
+                assert self.data['input-names'] == ds['input-names']
+                #assert (self.data['norm-stats'] == ds['norm-stats']).all()
+                assert self.data['n-samples'] == ds['n-samples']
+                assert self.data['n-frames'] == ds['n-frames'] == self.n_frames
+                assert self.data['n-channels'] == ds['n-channels'] == self.n_channels
+                #assert self.data['sample-strid'] == ds['sample-stride'] 
+                #assert self.data['dens-thresh'] == ds['dens-thresh'] 
+                #assert self.data['lon-range'] == ds['lat-range']
+                #assert self.data['dlat'] == ds['dlat']
+                #assert self.data['dlon'] == ds['dlon']
+                #assert self.data['dt'] == ds['dt']
+                #assert self.data['window-shape'] == ds['window-shape']
+                #assert self.data['normalized'] == ds['normalized']
+        
+            print 'current index: ', self.i
+            print ds['windows'].shape
+            ns = ds['windows'].shape[0]
+            self.inputs[self.i:self.i+ns] = ds['windows']
+            self.targets[self.i:self.i+ns] = ds['targets']
+            self.timestamps[self.i:self.i+ns] = ds['timestamps']
+            self.i += ns        
+            print 'new index: ', self.i     
+
+    dataset = Dataset(n_samples, n_frames, n_channels, n_wind_cells)
+        
+    pool = mp.Pool(min(mp.cpu_count(), len(paths)))
+    for p in paths:
+        print 'opening file: ', p
+        pool.apply_async(unpack_dataset, 
+                        args = [p], 
+                        callback=dataset.accumulate)
+    
+    pool.close()
+    pool.join()
+    
+    while (numpy.isnan(dataset.inputs)).any():
+        print 'dataset not filled'
+
+    # did we fill all the spaces we expected?
+    assert not (numpy.isnan(dataset.inputs)).any()
+    assert not (numpy.isnan(dataset.targets)).any()
+    #assert not (numpy.isnan(dataset.timestamps)).any()
+    assert n_samples == dataset.data['n-samples']
+    
+    print 'files loaded'
+
+    input_names = dataset.data['input-names']
     target_index = input_names.index(target_channel)
-    targets = dataset['target'][:,target_index]
-    inputs  = dataset['input']
-    mn,std = dataset['stats'][target_index,:]
+    targets = dataset.targets[:,target_index]
+    mn,std = dataset.data['norm-stats'][target_index,:]
+    inputs = dataset.inputs
     
     n_samples, nf, nc, n_dims = inputs.shape
     assert nf == n_frames
     assert nc == n_channels
     assert size**2 == n_dims
-
-    ar_test_error, ar_train_error, ar_weight_avg = crossval(ARmodel, inputs, targets, n_folds, center)
-    np_test_error, np_train_error, _ = crossval(NeutralPredictor, inputs, targets, n_folds, center)
+    
+    print 'performing crossval for AR'
+    ar_test_error, ar_train_error, ar_weight_avg = crossval(ARmodel, inputs, targets, n_folds, center, target_index)
+    print 'performing crossval for neutral predictor'
+    np_test_error, np_train_error, _ = crossval(NeutralPredictor, inputs, targets, n_folds, center, target_index)
 
     ar_test_error = ar_test_error * std
     ar_train_error = ar_train_error * std
     np_test_error = np_test_error * std
     np_train_error = np_train_error * std
+
+    print 'finished crossval'
 
     return ar_test_error, ar_train_error, np_test_error, np_train_error
 
@@ -143,9 +257,9 @@ def performance_tests(
                      def_n_frames = 1,
                      def_delta_time = 1.,
                      def_n_channels = 3,
-                     sizes = [3,5,7],
+                     sizes = [3,5,7,9,11,15],
                      num_frames = [2,3,4],
-                     delta_times = [3.,6.,12.]
+                     delta_times = [3.,6.],#,12.]
                      ):
 
     df = pandas.DataFrame(columns = ['ar-test-error', 
@@ -156,58 +270,64 @@ def performance_tests(
                                      'n-frames',
                                      'delta-time',
                                      'n-channels'])
-
-    def run_experiment(size, n_frames, delta_time, n_channels):
-        ar_test, ar_train, np_test, np_train = test_models(
-                                                          size = size,
-                                                          n_frames = n_frames,
-                                                          delta_time = delta_time,
-                                                          n_channels = n_channels
-                                                          )
-        df.append({'ar-test-error' : ar_test,
-                   'ar-train-error': ar_train,
-                   'np-test-error' : np_test,
-                   'np-train-error': np_train,
-                   'window-size' : size,
-                   'n-frames' : n_frames,
-                   'delta-time' : delta_time,
-                   'n-channels' : n_channels}, ignore_index = True)
-
-
-    # vary window size
-    for size in sizes:
-        run_experiment(
-                      size = size, 
-                      n_frames = def_n_frames, 
-                      delta_time = def_delta_time, 
-                      n_channels = def_n_channels
-                      )
-                                                          
-    # vary number of frames
-    for nf in num_frames:
-        run_experiment(
-                      size = def_size, 
-                      n_frames = nf, 
-                      delta_time = def_delta_time, 
-                      n_channels = def_n_channels
-                      )
-
-    # vary forecast interval with two different window sizes
-    for dt in delta_times:
-        run_experiment(
-                      size = def_size, 
-                      n_frames = def_n_frames, 
-                      delta_time = dt, 
-                      n_channels = def_n_channels
-                      )
     
-        # change window size to larger than default
-        run_experiment(
-                      size = 19, 
-                      n_frames = def_n_frames, 
-                      delta_time = dt, 
-                      n_channels = def_n_channels
-                      )
+    def run_experiment(size, n_frames, delta_time, n_channels, frame):
+        (ar_test, ar_train,
+        np_test, np_train) = test_models(
+                                         size = size,
+                                         n_frames = n_frames,
+                                         delta_time = delta_time,
+                                         n_channels = n_channels
+                                         )
+
+        print 'ar results shape: ', ar_test.shape
+    
+        return frame.append({'ar-test-error' : ar_test[0],
+                            'ar-train-error': ar_train[0],
+                            'np-test-error' : np_test[0],
+                            'np-train-error': np_train[0],
+                            'window-size' : size,
+                            'n-frames' : n_frames,
+                            'delta-time' : delta_time,
+                            'n-channels' : n_channels}, ignore_index = True)
+
+    
+
+    print 'varying window size'
+    for size in sizes:
+        df = run_experiment(
+                           size = size, 
+                           n_frames = def_n_frames, 
+                           delta_time = def_delta_time, 
+                           n_channels = def_n_channels,
+                           frame = df   
+                           )
+                                                          
+    #print 'varying number of frames'
+    #for nf in num_frames:
+    #    run_experiment(
+    #                  size = def_size, 
+    #                  n_frames = nf, 
+    #                  delta_time = def_delta_time, 
+    #                  n_channels = def_n_channels
+    #                  )
+
+    #print 'varying forecast interval with two different window sizes'
+    #for dt in delta_times:
+    #    run_experiment(
+    #                  size = def_size, 
+    #                  n_frames = def_n_frames, 
+    #                  delta_time = dt, 
+    #                  n_channels = def_n_channels
+    #                  )
+    #
+    #    # change window size to larger than default
+    #    run_experiment(
+    #                  size = 19, 
+    #                  n_frames = def_n_frames, 
+    #                  delta_time = dt, 
+    #                  n_channels = def_n_channels
+    #                  )
     timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
     df.to_csv('data/satellite/output/ar_performance_tests%s.csv' % timestamp)
 
@@ -218,34 +338,41 @@ def plot_performance(data_dir = 'data/satellite/output/'):
     df = pandas.read_csv(paths[-1]) # read most recent results
     
     # performance v window size
-    plt.subplot(311,1)
+    #plt.subplot(311,1)
     gb = df.groupby(['n-frames','delta-time','n-channels'])
     for indx, group in gb:
-        plt.plot(df['window-size'], df['ar-test-error'], label = str(indx)+' AR test') 
-        plt.plot(df['window-size'], df['ar-train-error'], label = str(indx)+' AR train')
-        plt.plot(df['window-size'], df['np-test-error'], label = str(indx)+' NP test')
-        plt.plot(df['window-size'], df['np-train-error'], label = str(indx)+' NP train')
+        print indx
+        print group
+        #print 'ar errors: ', numpy.array(group['ar-test-error'].values[0][1:-1].split(']['), dtype = float)    
+        plt.plot(group['window-size'], group['ar-test-error'], label = str(indx)+' AR test')
+        plt.plot(group['window-size'], group['ar-train-error'], label = str(indx)+' AR train')
+
+        print group['np-test-error']
+        print group['ar-test-error']
+        print group['ar-train-error']
+        plt.plot(group['window-size'], group['np-test-error'], label = str(indx)+' NP test')
+        #plt.plot(group['window-size'], group['np-train-error'], label = str(indx)+' NP train')
     plt.legend()
     
     # performance v number of frames
-    plt.subplot(311,2)
-    gb = df.groupby(['window-size','delta-time','n-channels'])
-    for indx, group in gb:
-        plt.plot(df['n-frames'], df['ar-test-error'], label = str(indx)+' AR test') 
-        plt.plot(df['n-frames'], df['ar-train-error'], label = str(indx)+' AR train') 
-        plt.plot(df['n-frames'], df['np-test-error'], label = str(indx)+' NP test') 
-        plt.plot(df['n-frames'], df['np-train-error'], label = str(indx)+' NP train') 
-    plt.legend()
-    
-    # performance v forecast interval (delta time)
-    plt.subplot(311,3)
-    gb = df.groupby(['window-size','n-frames','n-channels'])
-    for indx, group in gb:
-        plt.plot(df['delta-time'], df['ar-test-error'], label = str(indx)+' AR test') 
-        plt.plot(df['delta-time'], df['ar-train-error'], label = str(indx)+' AR train')
-        plt.plot(df['delta-time'], df['np-test-error'], label = str(indx)+' NP test')
-        plt.plot(df['delta-time'], df['np-train-error'], label = str(indx)+' NP train')
-    plt.legend()
+    #plt.subplot(311,2)
+    #gb = df.groupby(['window-size','delta-time','n-channels'])
+    #for indx, group in gb:
+    #    plt.plot(df['n-frames'], df['ar-test-error'], label = str(indx)+' AR test') 
+    #    plt.plot(df['n-frames'], df['ar-train-error'], label = str(indx)+' AR train') 
+    #    plt.plot(df['n-frames'], df['np-test-error'], label = str(indx)+' NP test') 
+    #    plt.plot(df['n-frames'], df['np-train-error'], label = str(indx)+' NP train') 
+    #plt.legend()
+    #
+    ## performance v forecast interval (delta time)
+    #plt.subplot(311,3)
+    #gb = df.groupby(['window-size','n-frames','n-channels'])
+    #for indx, group in gb:
+    #    plt.plot(df['delta-time'], df['ar-test-error'], label = str(indx)+' AR test') 
+    #    plt.plot(df['delta-time'], df['ar-train-error'], label = str(indx)+' AR train')
+    #    plt.plot(df['delta-time'], df['np-test-error'], label = str(indx)+' NP test')
+    #    plt.plot(df['delta-time'], df['np-train-error'], label = str(indx)+' NP train')
+    #plt.legend()
 
     plt.savefig(paths[-1][:-4] + '.png')
 
@@ -281,4 +408,5 @@ def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = Tru
     plt.savefig('ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, size))
 
 if __name__ == '__main__':
-    plac.call(performance_tests)
+    plac.call(plot_performance)
+    #plac.call(performance_tests)
