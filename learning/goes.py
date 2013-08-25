@@ -5,12 +5,17 @@ import numpy
 import glob
 import plac
 import pandas
+import cProfile
 import cPickle as pickle
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
 from solar.util import openz
 
+# split experiments into several phases
+# reparallelize
+# profile performance
+# numpy installation optimal?
 
 class NeutralPredictor(object):
 
@@ -115,8 +120,11 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
         not_mask = numpy.negative(mask)
         
         pool.apply_async(test_model, 
-                args = [model, inputs[mask], targets[mask], inputs[not_mask], targets[not_mask], center, target_index],
-                callback = errors.accumulate_errors)
+                         args = [model, 
+                                inputs[mask], targets[mask], 
+                                inputs[not_mask], targets[not_mask], 
+                                center, target_index],
+                         callback = errors.accumulate_errors)
     pool.close()
     pool.join()
 
@@ -257,19 +265,9 @@ def performance_tests(
                      def_n_frames = 1,
                      def_delta_time = 1.,
                      def_n_channels = 3,
-                     sizes = [3,5,7,9,11,15],
-                     num_frames = [2,3,4],
-                     delta_times = [3.,6.],#,12.]
+                     to_vary = 'sizes', # 'num-frames', delta-times'
+                     params = [7,9], # [2,3,4], [3.,6.,24.]
                      ):
-
-    df = pandas.DataFrame(columns = ['ar-test-error', 
-                                     'ar-train-error', 
-                                     'np-test-error', 
-                                     'np-train-error',
-                                     'window-size',
-                                     'n-frames',
-                                     'delta-time',
-                                     'n-channels'])
     
     def run_experiment(size, n_frames, delta_time, n_channels, frame):
         (ar_test, ar_train,
@@ -282,54 +280,52 @@ def performance_tests(
 
         print 'ar results shape: ', ar_test.shape
     
-        return frame.append({'ar-test-error' : ar_test[0],
-                            'ar-train-error': ar_train[0],
-                            'np-test-error' : np_test[0],
-                            'np-train-error': np_train[0],
-                            'window-size' : size,
-                            'n-frames' : n_frames,
-                            'delta-time' : delta_time,
-                            'n-channels' : n_channels}, ignore_index = True)
+        return {'ar-test-error' : ar_test[0],
+                'ar-train-error': ar_train[0],
+                'np-test-error' : np_test[0],
+                'np-train-error': np_train[0],
+                'window-size' : size,
+                'n-frames' : n_frames,
+                'delta-time' : delta_time,
+                'n-channels' : n_channels}
 
+    class DataTable(object):
+        
+        def __init__(self):
+            self.data = pandas.DataFrame(columns = [
+                                         'ar-test-error', 
+                                         'ar-train-error', 
+                                         'np-test-error', 
+                                         'np-train-error',
+                                         'window-size',
+                                         'n-frames',
+                                         'delta-time',
+                                         'n-channels'])
+
+        def update_frame(self, dic):            
+            self.data.append(dic, ignore_index = True)
     
+    pool = mp.Pool(min(mp.cpu_count(), len(params)))
 
-    print 'varying window size'
-    for size in sizes:
-        df = run_experiment(
-                           size = size, 
-                           n_frames = def_n_frames, 
-                           delta_time = def_delta_time, 
-                           n_channels = def_n_channels,
-                           frame = df   
-                           )
-                                                          
-    #print 'varying number of frames'
-    #for nf in num_frames:
-    #    run_experiment(
-    #                  size = def_size, 
-    #                  n_frames = nf, 
-    #                  delta_time = def_delta_time, 
-    #                  n_channels = def_n_channels
-    #                  )
+    data_table = DataTable()
+    for p in params:
+        
+        if to_vary is 'sizes':
+            inputs = [p, def_n_frames, def_delta_time, def_n_channels]
 
-    #print 'varying forecast interval with two different window sizes'
-    #for dt in delta_times:
-    #    run_experiment(
-    #                  size = def_size, 
-    #                  n_frames = def_n_frames, 
-    #                  delta_time = dt, 
-    #                  n_channels = def_n_channels
-    #                  )
-    #
-    #    # change window size to larger than default
-    #    run_experiment(
-    #                  size = 19, 
-    #                  n_frames = def_n_frames, 
-    #                  delta_time = dt, 
-    #                  n_channels = def_n_channels
-    #                  )
+        elif to_vary is 'num-frames':
+            inputs = [def_size, p, def_delta_time, def_n_channels]
+
+        elif to_vary is 'delta-times':
+            inputs = [def_size, def_n_frames, p, def_n_channels]
+        else: assert False
+        
+        pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
+
+
+
     timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
-    df.to_csv('data/satellite/output/ar_performance_tests%s.csv' % timestamp)
+    data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
 
 def plot_performance(data_dir = 'data/satellite/output/'):
     
@@ -408,5 +404,6 @@ def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = Tru
     plt.savefig('ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, size))
 
 if __name__ == '__main__':
-    plac.call(plot_performance)
+    #plac.call(plot_performance)
+    cProfile.run('performance_tests')
     #plac.call(performance_tests)
