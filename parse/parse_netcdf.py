@@ -1,3 +1,4 @@
+import os
 import plac
 import glob
 import copy
@@ -5,11 +6,11 @@ import numpy
 import pandas
 import functools
 import itertools as it
-import multiprocessing as mp
+import multiprocessing as mp 
+import scipy.interpolate
 import cPickle as pickle
 import netCDF4 as ncdf
-import matplotlib.pyplot as pyplot
-from scipy import interpolate
+#import matplotlib.pyplot as pyplot
 from solar.util import openz
 
 # XXX whats the difference between missing and mask?
@@ -168,24 +169,33 @@ def parse_nc(
              ):
 
     #print 'parsing', path
+
+    import scipy.interpolate
     samples = {}
     
     gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer)
-    interp_data = numpy.ones((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
+    interp_data = numpy.zeros((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
     # perform interpolation for each input
     for i, inp in enumerate(inputs):
         not_missing = gd.frame.dropna(how='any', subset=[inp])
         #print 'length of clean points for %s: ' % inp, len(not_missing)
         
-        if len(not_missing) > 4:
+        if len(not_missing) > 4: # min needed for griddata interpolation
             lat = not_missing['lat_rad'].values
             lon = not_missing['lon_rad'].values
             val = not_missing[inp].values
             try:
-                interp_data[i,:,:] = interpolate.griddata((lat,lon), val, (lat_grid, lon_grid), method = 'cubic')
+                print 'interpolating'
+                # XXX why wont this parallelize, and should we be smoothing?
+                # strangely, only nearest works now with parallelism where cubic did before (since numpy vers change?)
+                result = scipy.interpolate.griddata((lat,lon), val, 
+                                        (lat_grid,lon_grid), method = 'nearest') 
+                print 'result shape: ', result.shape
+                interp_data[i,:,:] = result
             except Exception as e:
                 print e
-
+    
+    #print 'dropping missing data'
     # drop grid cells missing any of the inputs
     gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
     gd.frame['lon_ind'] = numpy.floor((gd.frame['lon_rad'] - rad_lon_min) / dlon).astype(int)
@@ -195,6 +205,7 @@ def parse_nc(
     grid = grid.dropna(how = 'any', subset = inputs)
     
     # for each window position given stride length
+    #print 'iterating over window positions'
     for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
                            numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
 
@@ -208,9 +219,11 @@ def parse_nc(
         # XXX best way to determine observation density?
         # if density of observed data is high enough and there are no nans in the interpolated data
         if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
+            #print 'storing data point'
             # store this window as a sample by times    tep and position
             samples[(gd.timestamp, (x,y))] = interp_window
-
+    
+    #print 'parsed: ',  gd.timestamp
     return samples
 
 def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape):
@@ -229,7 +242,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
     windows = None; targets = None; timestamps = None
     for i in data_frame.index:
 
-        #print 'row %i of %i' % (i, len(sample_df.index))
+        #print 'row %i of %i' % (i, len(data_frame.index))
         
         row = data_frame.iloc[i]
         time = row['datetime']
@@ -240,6 +253,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
             
         next_rows = data_frame[mask]
         if len(next_rows) == (n_frames): # if there are n_frames valid frames
+            #print 'valid frame'
             next_rows.sort('datetime')
             winds = numpy.empty((n_frames, n_channels, n_wind_cells))
             winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
@@ -260,7 +274,6 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
                 timestamps = numpy.append(timestamps, times[None,:], axis = 0)
                 
                 assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] 
-    
     return windows, targets, timestamps
 
 def pickle_dat(i, dataset):
@@ -373,31 +386,70 @@ def main(
     print 'number of time lags: ', n_frames
     print 'number of channels: ', n_channels
 
-
-    part_parse_nc = functools.partial(parse_nc, # xxx make number of params smaller?
-                     inputs = inputs, 
-                     lat_range = lat_range, 
-                     lon_range = lon_range, 
-                     interp_buffer = interp_buffer, 
-                     n_channels = n_channels, 
-                     n_lat_cells = n_lat_cells, 
-                     n_lon_cells = n_lon_cells,
-                     n_wind_cells = n_wind_cells,
-                     lat_grid = lat_grid,
-                     lon_grid = lon_grid,
-                     rad_lat_min = rad_lat_min,
-                     rad_lon_min = rad_lon_min,
-                     dlat = dlat,
-                     dlon = dlon,
-                     sample_stride = sample_stride,
-                     dens_thresh = dens_thresh,
-                     window_shape = window_shape)
+    #part_parse_nc = functools.partial(parse_nc, 
+    #                 inputs = inputs, 
+    #                 lat_range = lat_range, 
+    #                 lon_range = lon_range, 
+    #                 interp_buffer = interp_buffer, 
+    #                 n_channels = n_channels, 
+    #                 n_lat_cells = n_lat_cells, 
+    #                 n_lon_cells = n_lon_cells,
+    #                 n_wind_cells = n_wind_cells,
+    #                 lat_grid = lat_grid,
+    #                 lon_grid = lon_grid,
+    #                 rad_lat_min = rad_lat_min,
+    #                 rad_lon_min = rad_lon_min,
+    #                 dlat = dlat,
+    #                 dlon = dlon,
+    #                 sample_stride = sample_stride,
+    #                 dens_thresh = dens_thresh,
+    #                 window_shape = window_shape)
     
+    # XXX why? stack overflow magic...
+    os.system("taskset -p 0xffffffffffffffff %d" % os.getpid()) 
     pool = mp.Pool(mp.cpu_count())
+
     samples = {}
-    dicts = pool.map_async(part_parse_nc, paths).get()
-    map(samples.update, dicts)
+    print 'parsing %i files in parallel' % len(paths)
+    for p in paths: 
+        #d = pool.apply_async(part_parse_nc, args=[p]).get()
+        #d = apply(part_parse_nc, [p])
+        #samples.update(apply(part_parse_nc, [p]))
+        
+        pool.apply_async(parse_nc,[p, 
+             inputs, 
+             lat_range, 
+             lon_range, 
+             interp_buffer, 
+             n_channels, 
+             n_lat_cells, 
+             n_lon_cells,
+             n_wind_cells,
+             lat_grid,
+             lon_grid,
+             rad_lat_min,
+             rad_lon_min,
+             dlat,
+             dlon,
+             sample_stride,
+             dens_thresh,
+             window_shape], callback = samples.update)
+
+    pool.close()
+    pool.join()
+
+
+    #dicts = pool.map_async(part_parse_nc, paths[]).get()
+    #map(samples.update, dicts)
     assert len(samples) > 0
+    #assert False
+
+    pool.close()
+    pool.join()
+
+
+
+    print 'data read from netcdf paths'
 
     # convert samples dict to DataFrame
     samp_keys = samples.keys()
@@ -422,6 +474,10 @@ def main(
 
         def append_sample(self, sample_tuple):
             winds, targs, times = sample_tuple
+            
+            if winds is None: return
+
+            #print 'sample tuple: ', sample_tuple
             assert winds.ndim == 4 # (n_samples, n_frames, n_channels, n_wind_cells) 
             assert targs.ndim == 2 # (n_samples, n_channels)
             assert times.ndim == 2 # (n_samples, n_frames) 
@@ -437,14 +493,24 @@ def main(
                     self.timestamps = numpy.append(self.timestamps, times, axis = 0)
 
     sample_set = SampleSet()
-    
-    for name, group in sample_gb:
-        pool.apply_async(split_loc_samples, 
-                args = [group, n_frames, n_channels, delta_time, window_shape], 
-                callback = sample_set.append_sample)
-    pool.close() 
-    pool.join()
 
+    os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
+    pool = mp.Pool(mp.cpu_count())
+    for name, group in sample_gb:
+        #print 'group: ', name
+        pool.apply_async(split_loc_samples, args = [group, n_frames, n_channels, delta_time, window_shape], callback = sample_set.append_sample)
+        #sample_set.append_sample(apply(split_loc_samples, [group, n_frames, n_channels, delta_time, window_shape]))
+
+    pool.close()
+    pool.join()
+    
+    if sample_set.windows is None: assert False
+
+    while len(mp.active_children()) > 0:
+        print 'pool state 1'
+        print 'active children: ', len(mp.active_children())
+        assert False
+    
     print 'sample input shape: ', sample_set.windows.shape
 
     stats = numpy.zeros((n_channels,2)); stats[:,1] = 1.
@@ -472,6 +538,8 @@ def main(
 
     n_samples = sample_set.windows.shape[0]
     n_files = numpy.ceil(n_samples / float(nper_file)).astype(int)
+
+    os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
     pool = mp.Pool(min(mp.cpu_count(), n_files))
     
     print 'number of samples collected: ', n_samples

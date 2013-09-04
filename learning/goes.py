@@ -8,8 +8,8 @@ import pandas
 import cProfile
 import cPickle as pickle
 import multiprocessing as mp
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import ImageGrid
+#import matplotlib.pyplot as plt
+#from mpl_toolkits.axes_grid1 import ImageGrid
 from solar.util import openz
 
 # split experiments into several phases
@@ -42,6 +42,8 @@ class ARmodel(NeutralPredictor):
     least squares weight coefficients '''
     def __init__(self, input_array, target_array, l2reg = 0., center = True, target_index = -1):
         
+        print 'initializing AR model'
+
         self.n_samples = input_array.shape[0]
 
         if len(input_array.shape) > 2:
@@ -52,12 +54,15 @@ class ARmodel(NeutralPredictor):
             input_array = numpy.hstack([input_array, numpy.ones((input_array.shape[0],1))])
         
         #self.theta = numpy.linalg.lstsq(input_array, target_array)[0]
+
+        print 'constructing reg and covariance matrices'
         self.l2reg = l2reg
         reg_matrix = self.l2reg * numpy.eye(input_array.shape[1])
         if center:
             reg_matrix[-1,-1] = 0.
         C = (1./self.n_samples) * numpy.dot(input_array.T, input_array) + reg_matrix
         b = (1./self.n_samples) * numpy.dot(input_array.T, target_array)
+        print 'solving for optimal linear weights'
         self.theta = numpy.linalg.solve(C, b)
     
     @staticmethod
@@ -76,10 +81,15 @@ class ARmodel(NeutralPredictor):
     
         return numpy.dot(input_array, self.theta)
 
-def test_model(model, train_inputs, train_targets, test_inputs, test_targets, center, target_index):
-    m = model(train_inputs, train_targets, center, target_index)
-    train_error = m.test_prediction(train_inputs, train_targets)
-    test_error = m.test_prediction(test_inputs, test_targets)
+def test_model(model, inputs, targets, mask, center, target_index):
+    print 'testing model: ', model
+    not_mask = numpy.negative(mask)
+    m = model(inputs[mask], targets[mask], center, target_index)
+    print 'model learned'
+    train_error = m.test_prediction(inputs[mask], targets[mask])
+    print 'test error measured'
+    test_error = m.test_prediction(inputs[not_mask], targets[not_mask])
+    print 'returning from test model'
     return test_error, train_error, m.theta
                           
 def crossval(model, inputs, targets, n_folds, center, target_index):
@@ -119,12 +129,10 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
         mask[ind_a:ind_b] = False
         not_mask = numpy.negative(mask)
         
-        pool.apply_async(test_model, 
-                         args = [model, 
-                                inputs[mask], targets[mask], 
-                                inputs[not_mask], targets[not_mask], 
-                                center, target_index],
-                         callback = errors.accumulate_errors)
+        #pool.apply_async(test_model, 
+        #            args = [model, inputs, targets, mask, center, target_index], 
+        #            callback = errors.accumulate_errors)
+        errors.accumulate_errors(test_model(model, inputs, targets, mask, center,target_index))
     pool.close()
     pool.join()
 
@@ -134,10 +142,8 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
     return errors.test_error / float(n_folds), errors.train_error / float(n_folds), errors.weights / float(n_folds)
 
 def unpack_dataset(path):
-        with openz(path) as data_file:
-            ds = pickle.load(data_file)
-        print 'unpacked file: ', path
-        return ds  
+    with openz(path) as data_file:
+        return pickle.load(data_file)  
 
 def test_models(
     data_dir = 'data/satellite/processed/',
@@ -153,14 +159,17 @@ def test_models(
             (delta_time, n_frames, n_channels, size))
 
     assert len(paths) > 0
-
+    sorted(paths)
     print 'matching files: ', paths
-    print 'using first: ', paths[0]
+
+    print 'using: ', paths[0]
     
     # find all files from the same batch
     path = paths[0]
     part = path[:-11] 
     paths = glob.glob(part+'*.pickle.gz')
+    
+    print 'len of paths: ', len(paths)
 
     par_grp = re.match(
         '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle\.gz',
@@ -214,18 +223,23 @@ def test_models(
 
     dataset = Dataset(n_samples, n_frames, n_channels, n_wind_cells)
         
+    print 'min cpus for pool: ', min(mp.cpu_count, len(paths))
     pool = mp.Pool(min(mp.cpu_count(), len(paths)))
+    
+    print pool
+    print 'paths: ', paths
     for p in paths:
-        print 'opening file: ', p
-        pool.apply_async(unpack_dataset, 
-                        args = [p], 
-                        callback=dataset.accumulate)
+        print 'opening file: ', p 
+        #pool.apply_async(unpack_dataset, args = [p],callback=dataset.accumulate)
+        dataset.accumulate(apply(unpack_dataset, [p]))
     
     pool.close()
     pool.join()
     
     while (numpy.isnan(dataset.inputs)).any():
+        print 'pool state: ', pool._state
         print 'dataset not filled'
+        assert False
 
     # did we fill all the spaces we expected?
     assert not (numpy.isnan(dataset.inputs)).any()
@@ -260,34 +274,35 @@ def test_models(
 
     return ar_test_error, ar_train_error, np_test_error, np_train_error
 
+def run_experiment(size, n_frames, delta_time, n_channels):
+    (ar_test, ar_train,
+    np_test, np_train) = test_models(
+                                     size = size,
+                                     n_frames = n_frames,
+                                     delta_time = delta_time,
+                                     n_channels = n_channels
+                                     )
+
+    return {'ar-test-error' : ar_test[0], # XXX hack to get first element?
+            'ar-train-error': ar_train[0],
+            'np-test-error' : np_test[0],
+            'np-train-error': np_train[0],
+            'window-size' : size,
+            'n-frames' : n_frames,
+            'delta-time' : delta_time,
+            'n-channels' : n_channels}
+
 def performance_tests(
                      def_size = 11,
                      def_n_frames = 1,
                      def_delta_time = 1.,
                      def_n_channels = 3,
-                     to_vary = 'sizes', # 'num-frames', delta-times'
-                     params = [7,9], # [2,3,4], [3.,6.,24.]
+                     to_vary = 'delta-times', # 'sizes', # 'num-frames', delta-times'
+                     params = [3,6,24], # [3, 5, 7, 9, 11, 15] #,  [2,3,4], [3.,6.,24.]
+                     #sizes = [11], #,15],
+                     #num_frames = [2,3,4],
+                     #delta_times = [3.,6.],#,12.]
                      ):
-    
-    def run_experiment(size, n_frames, delta_time, n_channels, frame):
-        (ar_test, ar_train,
-        np_test, np_train) = test_models(
-                                         size = size,
-                                         n_frames = n_frames,
-                                         delta_time = delta_time,
-                                         n_channels = n_channels
-                                         )
-
-        print 'ar results shape: ', ar_test.shape
-    
-        return {'ar-test-error' : ar_test[0],
-                'ar-train-error': ar_train[0],
-                'np-test-error' : np_test[0],
-                'np-train-error': np_train[0],
-                'window-size' : size,
-                'n-frames' : n_frames,
-                'delta-time' : delta_time,
-                'n-channels' : n_channels}
 
     class DataTable(object):
         
@@ -303,29 +318,36 @@ def performance_tests(
                                          'n-channels'])
 
         def update_frame(self, dic):            
-            self.data.append(dic, ignore_index = True)
+            self.data = self.data.append(dic, ignore_index = True)
     
-    pool = mp.Pool(min(mp.cpu_count(), len(params)))
-
     data_table = DataTable()
+    
+    #pool = mp.Pool(min(mp.cpu_count(), len(params)))
     for p in params:
-        
-        if to_vary is 'sizes':
+        print to_vary
+        print p
+        if to_vary == 'sizes':
             inputs = [p, def_n_frames, def_delta_time, def_n_channels]
 
-        elif to_vary is 'num-frames':
+        elif to_vary == 'num-frames':
             inputs = [def_size, p, def_delta_time, def_n_channels]
 
-        elif to_vary is 'delta-times':
+        elif to_vary == 'delta-times':
             inputs = [def_size, def_n_frames, p, def_n_channels]
-        else: assert False
+        else:
+            print to_vary
+            assert False
         
-        pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
+        #data_table.update_frame(pool.apply_async(run_experiment, args=inputs)
+        data_table.update_frame(apply(run_experiment, inputs))
 
+        timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
+        data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
+    #pool.close()
+    #pool.join()
 
-
-    timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
-    data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
+    #timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
+    #data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp)) # 
 
 def plot_performance(data_dir = 'data/satellite/output/'):
     
@@ -405,5 +427,5 @@ def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = Tru
 
 if __name__ == '__main__':
     #plac.call(plot_performance)
-    cProfile.run('performance_tests')
-    #plac.call(performance_tests)
+    #cProfile.run('performance_tests()')
+    plac.call(performance_tests)
