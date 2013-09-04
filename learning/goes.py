@@ -8,8 +8,8 @@ import pandas
 import cProfile
 import cPickle as pickle
 import multiprocessing as mp
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import ImageGrid
+#import matplotlib.pyplot as plt
+#from mpl_toolkits.axes_grid1 import ImageGrid
 from solar.util import openz
 
 # split experiments into several phases
@@ -260,16 +260,7 @@ def test_models(
 
     return ar_test_error, ar_train_error, np_test_error, np_train_error
 
-def performance_tests(
-                     def_size = 11,
-                     def_n_frames = 1,
-                     def_delta_time = 1.,
-                     def_n_channels = 3,
-                     to_vary = 'sizes', # 'num-frames', delta-times'
-                     params = [7,9], # [2,3,4], [3.,6.,24.]
-                     ):
-    
-    def run_experiment(size, n_frames, delta_time, n_channels, frame):
+def run_experiment(size, n_frames, delta_time, n_channels):
         (ar_test, ar_train,
         np_test, np_train) = test_models(
                                          size = size,
@@ -278,8 +269,6 @@ def performance_tests(
                                          n_channels = n_channels
                                          )
 
-        print 'ar results shape: ', ar_test.shape
-    
         return {'ar-test-error' : ar_test[0],
                 'ar-train-error': ar_train[0],
                 'np-test-error' : np_test[0],
@@ -288,6 +277,15 @@ def performance_tests(
                 'n-frames' : n_frames,
                 'delta-time' : delta_time,
                 'n-channels' : n_channels}
+
+def performance_tests(
+                     def_size = 11,
+                     def_n_frames = 1,
+                     def_delta_time = 1.,
+                     def_n_channels = 3,
+                     to_vary = 'sizes', # 'num-frames', delta-times'
+                     params = [3,5,7,9,11,15,19], # [2,3,4], [3.,6.,24.]
+                     ):
 
     class DataTable(object):
         
@@ -320,9 +318,11 @@ def performance_tests(
             inputs = [def_size, def_n_frames, p, def_n_channels]
         else: assert False
         
-        pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
+        #pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
+        data_table.update_frame(run_experiment(*inputs))
 
-
+    pool.close()
+    pool.join()
 
     timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
     data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
@@ -405,5 +405,5 @@ def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = Tru
 
 if __name__ == '__main__':
     #plac.call(plot_performance)
-    cProfile.run('performance_tests')
-    #plac.call(performance_tests)
+    #cProfile.run('performance_tests')
+    plac.call(performance_tests)

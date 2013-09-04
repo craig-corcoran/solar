@@ -1,3 +1,4 @@
+import os
 import plac
 import glob
 import copy
@@ -5,12 +6,13 @@ import numpy
 import pandas
 import functools
 import itertools as it
+import condor
 import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
-import matplotlib.pyplot as pyplot
+#import matplotlib.pyplot as pyplot
 from scipy import interpolate
-from solar.util import openz
+
 
 # XXX whats the difference between missing and mask?
 # XXX store non-spatial parameters separately?
@@ -30,11 +32,12 @@ class GoesData(object):
         
         # read netcdf file into pandas data frame
         self.frame, self.meta = self.nc_to_frame(path, use_masked = use_masked) # removes all but lat, lon, inputs, and datetime
-
-        self.timestamp = self.convert_to_datetime(
-                                            self.frame['img_date'].values[0],
-                                            self.frame['img_time'].values[0])
-        self.rescale()
+    
+        if self.frame is not None:
+            self.timestamp = self.convert_to_datetime(
+                                                self.frame['img_date'].values[0],
+                                                self.frame['img_time'].values[0])
+            self.rescale()
         
 
     def rescale(self):
@@ -69,7 +72,23 @@ class GoesData(object):
         ''' converts NetCDF dataset into pandas DataFrame, removing missing 
         values and regions outside lat/lon range + iterpolation buffer. keeps
         only date, time, lat, lon, and inputs'''
-        ds = ncdf.Dataset(path) # NetCDF dataset
+    
+        print 'path: ', path
+
+        if '.gz' == path[-3:]: 
+            os.system("gunzip %s" % path)
+            path = path[:-3]
+        else: assert ('.nc' == path[-3:])
+        
+        try:
+            ds = ncdf.Dataset(path) # NetCDF dataset
+            os.system("gzip --fast %s" % path)
+        except RuntimeError as e:
+            print 'corrupted file, deleting: ', path
+            print e
+            os.system("rm %s" % path)
+            return None, None
+
         n_rows = ds.variables[ds.variables.keys()[-1]].shape[1]
         df = pandas.DataFrame(index = numpy.arange(n_rows))
         meta = pandas.DataFrame()
@@ -171,6 +190,9 @@ def parse_nc(
     samples = {}
     
     gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer)
+    
+    if gd.frame is None: return None
+
     interp_data = numpy.ones((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
     # perform interpolation for each input
     for i, inp in enumerate(inputs):
@@ -264,6 +286,9 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
     return windows, targets, timestamps
 
 def pickle_dat(i, dataset):
+    
+    from solar.util import openz
+
     delta_time = dataset['dt']
     n_frames = dataset['n-frames']
     n_channels = dataset['n-channels']
@@ -284,6 +309,7 @@ def pickle_dat(i, dataset):
 # swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
+workers=('number of condor workers', 'option', None, int),
 path = ('path to netCDF (.nc) file', 'option', None, str),
 window_size = ('2-tuple shape of sample grid window', 'option', None, int),
 n_frames = ('number of past timesteps into the past used for prediction', 'option', None, int),
@@ -296,9 +322,11 @@ interp_buffer = ('2-tuple in degrees of buffer around lat/lon_range to include f
 dens_thresh = ('fraction of full observation density that must be present for sample to be considered valid', 'option', None, float),
 sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, int),
 normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
+nper_file = ('number of samples per file', 'option', None, int),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
+    workers = 0,
     path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
     window_size = 9, # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
@@ -338,7 +366,12 @@ def main(
     input grids and target values for the given input channels
     '''
     
+    zipped_paths = glob.glob(path + '*.nc.gz')
     paths = glob.glob(path + '*.nc')
+    paths.extend(zipped_paths)
+
+    assert len(paths) > 0
+
     if lat_range is None:
         rad_lat_min = rad_lon_min = None
         rad_lat_max = rad_lon_max = None
@@ -392,11 +425,34 @@ def main(
                      sample_stride = sample_stride,
                      dens_thresh = dens_thresh,
                      window_shape = window_shape)
+
     
-    pool = mp.Pool(mp.cpu_count())
+    n_files = 1000
+    def yield_jobs():
+        for p in paths[:n_files]:
+            yield (part_parse_nc, [p])
+    
     samples = {}
-    dicts = pool.map_async(part_parse_nc, paths).get()
-    map(samples.update, dicts)
+    for (_, out) in condor.do(yield_jobs(), workers):
+        if out is not None:
+            samples.update(out)
+
+    #samples = DictWrap()
+    #for p in paths:
+    #    samples.update(part_parse_nc(p))
+    #class DictWrap(object):
+        
+        #def __init__(self):
+            #self.d = {}
+
+        #def update(self, nd):
+            #if nd is not None:
+                #self.d.update(nd)
+    #pool = mp.Pool(mp.cpu_count())
+    #dicts = pool.map_async(part_parse_nc, paths[:1000]).get()
+    #map(samples.update, dicts)
+    #samples = samples.d
+
     assert len(samples) > 0
 
     # convert samples dict to DataFrame
@@ -422,28 +478,31 @@ def main(
 
         def append_sample(self, sample_tuple):
             winds, targs, times = sample_tuple
-            assert winds.ndim == 4 # (n_samples, n_frames, n_channels, n_wind_cells) 
-            assert targs.ndim == 2 # (n_samples, n_channels)
-            assert times.ndim == 2 # (n_samples, n_frames) 
-            
-            if winds.shape[0] > 0:
-                if self.windows is None:
-                    self.windows = winds
-                    self.targets = targs
-                    self.timestamps = times
-                else:
-                    self.windows = numpy.append(self.windows, winds, axis = 0)
-                    self.targets = numpy.append(self.targets, targs, axis = 0)
-                    self.timestamps = numpy.append(self.timestamps, times, axis = 0)
+            if winds is not None:
+                assert winds.ndim == 4 # (n_samples, n_frames, n_channels, n_wind_cells) 
+                assert targs.ndim == 2 # (n_samples, n_channels)
+                assert times.ndim == 2 # (n_samples, n_frames) 
+                
+                if winds.shape[0] > 0:
+                    if self.windows is None:
+                        self.windows = winds
+                        self.targets = targs
+                        self.timestamps = times
+                    else:
+                        self.windows = numpy.append(self.windows, winds, axis = 0)
+                        self.targets = numpy.append(self.targets, targs, axis = 0)
+                        self.timestamps = numpy.append(self.timestamps, times, axis = 0)
 
     sample_set = SampleSet()
-    
+    pool = mp.Pool(mp.cpu_count())
     for name, group in sample_gb:
         pool.apply_async(split_loc_samples, 
                 args = [group, n_frames, n_channels, delta_time, window_shape], 
                 callback = sample_set.append_sample)
     pool.close() 
     pool.join()
+
+    assert sample_set.windows is not None
 
     print 'sample input shape: ', sample_set.windows.shape
 
@@ -505,8 +564,6 @@ def main(
     pool.close()
     pool.join()
     print 'done'
-    
-
 
 if __name__ == '__main__':
     plac.call(main)
