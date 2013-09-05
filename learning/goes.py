@@ -8,8 +8,8 @@ import pandas
 import cProfile
 import cPickle as pickle
 import multiprocessing as mp
-#import matplotlib.pyplot as plt
-#from mpl_toolkits.axes_grid1 import ImageGrid
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import ImageGrid
 from solar.util import openz
 
 # split experiments into several phases
@@ -103,23 +103,27 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
     if len(targets.shape) == 1:
         targets = targets[:,None]
     n_targets = targets.shape[1]
-    pool = mp.Pool(min(mp.cpu_count(), n_folds))
+    
     
     class Errors(object):
         
         def __init__(self):
-            self.test_error = numpy.zeros(n_targets)
-            self.train_error = numpy.zeros(n_targets)
+            self.test_error = numpy.zeros((n_folds, n_targets))
+            self.train_error = numpy.zeros((n_folds, n_targets))
             self.weights = None
+            self.ind = 0
         
         def accumulate_errors(self, inp):
             #print 'accumulate error input: ', inp
-            ts_error, tr_error, wts = inp
-            self.test_error += ts_error
-            self.train_error += tr_error
+            ts_error, tr_error, wts = inp # XXX test and training different?
+            self.test_error[self.ind] = ts_error
+            self.train_error[self.ind] = tr_error
             self.weights = wts if self.weights is None else self.weights + wts
+            self.ind += 1
     
     errors = Errors()
+    pool = mp.Pool(min(mp.cpu_count(), n_folds))    
+    print 'beginning folds'
     for f in xrange(n_folds):
         
         print 'fold number: ', f    
@@ -129,20 +133,27 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
         mask[ind_a:ind_b] = False
         not_mask = numpy.negative(mask)
         
-        #pool.apply_async(test_model, 
-        #            args = [model, inputs, targets, mask, center, target_index], 
-        #            callback = errors.accumulate_errors)
-        errors.accumulate_errors(test_model(model, inputs, targets, mask, center,target_index))
+        pool.apply_async(test_model, 
+                    args = [model, inputs, targets, mask, center, target_index], 
+                    callback = errors.accumulate_errors)
+        #errors.accumulate_errors(test_model(model, inputs, targets, mask, center,target_index))
     pool.close()
     pool.join()
 
     assert not (errors.test_error == 0).all()
     assert errors.weights is not None
+    
+    # XXX not compatible with n_targets > 1
+    return {'test-error': numpy.mean(errors.test_error), 
+           'train-error': numpy.mean(errors.train_error),
+           'test-std': numpy.std(errors.test_error), 
+           'train-std': numpy.std(errors.train_error),
+           'avg-weights': errors.weights / float(n_folds)}
 
-    return errors.test_error / float(n_folds), errors.train_error / float(n_folds), errors.weights / float(n_folds)
+    #return errors.test_error / float(n_folds), errors.train_error / float(n_folds), errors.weights / float(n_folds)
 
 def unpack_dataset(path):
-    with openz(path) as data_file:
+    with open(path) as data_file:
         return pickle.load(data_file)  
 
 def test_models(
@@ -153,9 +164,11 @@ def test_models(
     n_frames = 1,
     delta_time = 1., # in hours
     n_channels = 3,
+    max_samples = 100000,
     center = True):
     
-    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.0.pickle.gz' % 
+    # XXX gzip?
+    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.0.pickle' % 
             (delta_time, n_frames, n_channels, size))
 
     assert len(paths) > 0
@@ -166,13 +179,13 @@ def test_models(
     
     # find all files from the same batch
     path = paths[0]
-    part = path[:-11] 
-    paths = glob.glob(part+'*.pickle.gz')
+    part = path[:-9] # XXX 11 if zipped
+    paths = glob.glob(part+'*.pickle')
     
     print 'len of paths: ', len(paths)
 
     par_grp = re.match(
-        '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle\.gz',
+        '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle',
         path).groups()
     n_frames, n_channels, wind_size, n_samples = map(int, par_grp)
     n_wind_cells = wind_size**2
@@ -224,22 +237,16 @@ def test_models(
     dataset = Dataset(n_samples, n_frames, n_channels, n_wind_cells)
         
     print 'min cpus for pool: ', min(mp.cpu_count, len(paths))
-    pool = mp.Pool(min(mp.cpu_count(), len(paths)))
     
-    print pool
+    pool = mp.Pool(min(mp.cpu_count(), len(paths)))
     print 'paths: ', paths
     for p in paths:
         print 'opening file: ', p 
-        #pool.apply_async(unpack_dataset, args = [p],callback=dataset.accumulate)
-        dataset.accumulate(apply(unpack_dataset, [p]))
+        pool.apply_async(unpack_dataset, args = [p], callback=dataset.accumulate)
+        #dataset.accumulate(apply(unpack_dataset, [p]))
     
     pool.close()
     pool.join()
-    
-    while (numpy.isnan(dataset.inputs)).any():
-        print 'pool state: ', pool._state
-        print 'dataset not filled'
-        assert False
 
     # did we fill all the spaces we expected?
     assert not (numpy.isnan(dataset.inputs)).any()
@@ -259,34 +266,42 @@ def test_models(
     assert nf == n_frames
     assert nc == n_channels
     assert size**2 == n_dims
+
+    if max_samples is not None:
+        targets = targets[:max_samples]
+        inputs = inputs[:max_samples]
     
     print 'performing crossval for AR'
-    ar_test_error, ar_train_error, ar_weight_avg = crossval(ARmodel, inputs, targets, n_folds, center, target_index)
+    ar_results = crossval(ARmodel, inputs, targets, n_folds, center, target_index)
     print 'performing crossval for neutral predictor'
-    np_test_error, np_train_error, _ = crossval(NeutralPredictor, inputs, targets, n_folds, center, target_index)
-
-    ar_test_error = ar_test_error * std
-    ar_train_error = ar_train_error * std
-    np_test_error = np_test_error * std
-    np_train_error = np_train_error * std
+    np_results = crossval(NeutralPredictor, inputs, targets, n_folds, center, target_index)
+    
+    for key in ar_results:
+        if key is not 'avg-weights':
+            ar_results[key] = ar_results[key] * std
+            np_results[key] = np_results[key] * std
 
     print 'finished crossval'
 
-    return ar_test_error, ar_train_error, np_test_error, np_train_error
+    return ar_results, np_results 
 
 def run_experiment(size, n_frames, delta_time, n_channels):
-        (ar_test, ar_train,
-        np_test, np_train) = test_models(
-                                         size = size,
-                                         n_frames = n_frames,
-                                         delta_time = delta_time,
-                                         n_channels = n_channels
-                                         )
 
-        return {'ar-test-error' : ar_test[0],
-                'ar-train-error': ar_train[0],
-                'np-test-error' : np_test[0],
-                'np-train-error': np_train[0],
+        ar_results, np_results = test_models(
+                                            size = size,
+                                            n_frames = n_frames,
+                                            delta_time = delta_time,
+                                            n_channels = n_channels
+                                            )
+
+        return {'ar-test-error' : ar_results['test-error'], 
+                'ar-train-error': ar_results['train-error'],
+                'np-test-error' : np_results['test-error'],
+                'np-train-error': np_results['train-error'],
+                'ar-test-std' : ar_results['test-std'], 
+                'ar-train-std': ar_results['train-std'],
+                'np-test-std' : np_results['test-std'],
+                'np-train-std': np_results['train-std'],
                 'window-size' : size,
                 'n-frames' : n_frames,
                 'delta-time' : delta_time,
@@ -295,10 +310,10 @@ def run_experiment(size, n_frames, delta_time, n_channels):
 def performance_tests(
                      def_size = 11,
                      def_n_frames = 1,
-                     def_delta_time = 1.,
+                     def_delta_time = 3.,
                      def_n_channels = 3,
                      to_vary = 'sizes', # 'num-frames', delta-times'
-                     params = [3,5,7,9,11,15,19], # [2,3,4], [3.,6.,24.]
+                     params = [19], # [2,3,4], [3.,6.,24.] [3,5,7,9,11,
                      ):
 
     class DataTable(object):
@@ -309,6 +324,10 @@ def performance_tests(
                                          'ar-train-error', 
                                          'np-test-error', 
                                          'np-train-error',
+                                         'ar-test-std', 
+                                         'ar-train-std', 
+                                         'np-test-std', 
+                                         'np-train-std',
                                          'window-size',
                                          'n-frames',
                                          'delta-time',
@@ -335,13 +354,17 @@ def performance_tests(
             print to_vary
             assert False
         
-        #data_table.update_frame(pool.apply_async(run_experiment, args=inputs)
+        #pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
         data_table.update_frame(apply(run_experiment, inputs))
 
         timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
         data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
+
+        
     #pool.close()
     #pool.join()
+    
+
 
     #timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
     #data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp)) # 
@@ -349,25 +372,40 @@ def performance_tests(
 def plot_performance(data_dir = 'data/satellite/output/'):
     
     paths = glob.glob(data_dir + 'ar_performance_tests*.csv')
-    sorted(paths)
+    paths = sorted(paths)
+    print 'using most recent: ', paths[-1]
     df = pandas.read_csv(paths[-1]) # read most recent results
     
+    print df 
     # performance v window size
     #plt.subplot(311,1)
     gb = df.groupby(['n-frames','delta-time','n-channels'])
     for indx, group in gb:
         print indx
         print group
-        #print 'ar errors: ', numpy.array(group['ar-test-error'].values[0][1:-1].split(']['), dtype = float)    
-        plt.plot(group['window-size'], group['ar-test-error'], label = str(indx)+' AR test')
-        plt.plot(group['window-size'], group['ar-train-error'], label = str(indx)+' AR train')
+        print type(group)
+        print 'number of rows: ', len(group.index)
+        #print 'ar errors: ', numpy.array(group['ar-test-error'].values[0][1:-1].split(']['), dtype = float) 
 
-        print group['np-test-error']
-        print group['ar-test-error']
-        print group['ar-train-error']
-        plt.plot(group['window-size'], group['np-test-error'], label = str(indx)+' NP test')
-        #plt.plot(group['window-size'], group['np-train-error'], label = str(indx)+' NP train')
-    plt.legend()
+        #plt.fill_between(group['window-size'].values, 
+        #                group['ar-test-error'].values - group['ar-test-std'].values, 
+        #                group['ar-test-error'].values + group['ar-test-std'].values, 
+        #                alpha=0.1, linewidth=0, color = 'g')
+        plt.plot(group['window-size'], group['ar-test-error'], label = ' AR test', color = 'g')
+
+        #plt.fill_between(group['window-size'].values, 
+        #                group['ar-train-error'].values - group['ar-train-std'].values, 
+        #                group['ar-train-error'].values + group['ar-train-std'].values, 
+        #                alpha=0.1, linewidth=0, color = 'b')
+        #plt.plot(group['window-size'], group['ar-train-error'], label = ' AR train', color = 'b')
+
+        #plt.fill_between(group['window-size'].values, 
+        #                group['np-test-error'].values - group['np-test-std'].values, 
+        #                group['np-test-error'].values + group['np-test-std'].values, 
+        #                alpha=0.1, linewidth=0, color = 'r')
+        plt.plot(group['window-size'], group['np-test-error'], label = ' NP test', color = 'r')
+        
+    plt.legend(loc = 'center right')
     
     # performance v number of frames
     #plt.subplot(311,2)

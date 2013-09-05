@@ -72,7 +72,7 @@ class GoesData(object):
         values and regions outside lat/lon range + iterpolation buffer. keeps
         only date, time, lat, lon, and inputs'''
     
-        print 'path: ', path
+        #print 'path: ', path
 
         if '.gz' == path[-3:]: 
             os.system("gunzip %s" % path)
@@ -81,7 +81,7 @@ class GoesData(object):
         
         try:
             ds = ncdf.Dataset(path) # NetCDF dataset
-            os.system("gzip --fast %s" % path)
+            #os.system("gzip --fast %s" % path)
         except RuntimeError as e:
             print 'corrupted file, deleting: ', path
             print e
@@ -205,12 +205,12 @@ def parse_nc(
             lon = not_missing['lon_rad'].values
             val = not_missing[inp].values
             try:
-                print 'interpolating'
+                #print 'interpolating'
                 # XXX why wont this parallelize, and should we be smoothing?
                 # strangely, only nearest works now with parallelism where cubic did before (since numpy vers change?)
                 result = scipy.interpolate.griddata((lat,lon), val, 
-                                        (lat_grid,lon_grid), method = 'nearest') 
-                print 'result shape: ', result.shape
+                                        (lat_grid,lon_grid), method = 'cubic') 
+                #print 'result shape: ', result.shape
                 interp_data[i,:,:] = result
             except Exception as e:
                 print e
@@ -312,7 +312,8 @@ def pickle_dat(i, dataset):
     sample_stride = dataset['sample-stride']
     dens_thresh = dataset['dens-thresh']
     
-    with openz('data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle.gz' % 
+    # XXX gzip?
+    with openz('data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle' % 
             (delta_time, n_frames, n_channels, window_size, sample_stride[0], dens_thresh, n_samples, i), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
@@ -320,7 +321,6 @@ def pickle_dat(i, dataset):
 # swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
-workers=('number of condor workers', 'option', None, int),
 path = ('path to netCDF (.nc) file', 'option', None, str),
 window_size = ('2-tuple shape of sample grid window', 'option', None, int),
 n_frames = ('number of past timesteps into the past used for prediction', 'option', None, int),
@@ -334,10 +334,10 @@ dens_thresh = ('fraction of full observation density that must be present for sa
 sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, int),
 normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
 nper_file = ('number of samples per file', 'option', None, int),
+files = ('number of total files to process', 'option', None, int),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    workers = 0,
     path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
     window_size = 9, # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
@@ -351,10 +351,11 @@ def main(
     sample_stride = 1,
     normalized = True,
     nper_file = 100000,
+    files = None,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
-            #'ch14','ch14_std','ch14clr', 
+            #'ch14','ch14_std','ch14clr',   
             #'frac_snow',
             #'lst', 'trad',
             #'iwp', 'lwp',
@@ -437,15 +438,15 @@ def main(
                      window_shape = window_shape)
 
     
-    n_files = 1000
-    def yield_jobs():
-        for p in paths[:n_files]:
-            yield (part_parse_nc, [p])
-    
-    samples = {}
-    for (_, out) in condor.do(yield_jobs(), workers):
-        if out is not None:
-            samples.update(out)
+    #n_files = 1000
+    #def yield_jobs():
+    #    for p in paths[:n_files]:
+    #        yield (part_parse_nc, [p])
+    #
+    #samples = {}
+    #for (_, out) in condor.do(yield_jobs(), workers):
+    #    if out is not None:
+    #        samples.update(out)
 
     #samples = DictWrap()
     #for p in paths:
@@ -458,19 +459,19 @@ def main(
         #def update(self, nd):
             #if nd is not None:
                 #self.d.update(nd)
-    #pool = mp.Pool(mp.cpu_count())
-    #dicts = pool.map_async(part_parse_nc, paths[:1000]).get()
-    #map(samples.update, dicts)
+    samples = {}
+    #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
+    pool = mp.Pool(int(mp.cpu_count()*0.75))
+    files = len(paths) if files is None else files
+    dicts = pool.map_async(part_parse_nc, paths[:files]).get()
+    map(samples.update, dicts)
+    
     #samples = samples.d
 
-    #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid()) 
     assert len(samples) > 0
-    #assert False
 
     pool.close()
     pool.join()
-
-
 
     print 'data read from netcdf paths'
 
@@ -512,8 +513,9 @@ def main(
                         self.targets = numpy.append(self.targets, targs, axis = 0)
                         self.timestamps = numpy.append(self.timestamps, times, axis = 0)
 
+    # XXX move normalization and pickling to sample set object?
     sample_set = SampleSet()
-
+    
     pool = mp.Pool(mp.cpu_count())
     for name, group in sample_gb:
         #print 'group: ', name
@@ -555,7 +557,7 @@ def main(
     n_samples = sample_set.windows.shape[0]
     n_files = numpy.ceil(n_samples / float(nper_file)).astype(int)
 
-    os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
+    #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
     pool = mp.Pool(min(mp.cpu_count(), n_files))
     
     print 'number of samples collected: ', n_samples
