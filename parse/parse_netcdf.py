@@ -10,7 +10,7 @@ import itertools as it
 import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
-#import matplotlib.pyplot as pyplot
+import matplotlib.pyplot as pyplot
 from scipy import interpolate
 
 # XXX whats the difference between missing and mask?
@@ -19,7 +19,7 @@ from scipy import interpolate
 class GoesData(object):
 
     ''' represents a single NetCDF (.nc) file with utilities to rescale the data
-    into the native units and parse into a pandas dataframe'''
+    into the native units and parse into a pandas dataframe '''
     
     def __init__(self, path, inputs, lat_range = None, lon_range = None, 
                 interp_buffer = None, use_masked = True):
@@ -209,7 +209,10 @@ def parse_nc(
                 # XXX why wont this parallelize, and should we be smoothing?
                 # strangely, only nearest works now with parallelism where cubic did before (since numpy vers change?)
                 result = scipy.interpolate.griddata((lat,lon), val, 
-                                        (lat_grid,lon_grid), method = 'cubic') 
+                                        (lat_grid,lon_grid), method = 'cubic')
+
+                pyplot.imshow(result, cmap = 'jet')
+                pyplot.savefig('interpolated.%i.%f.png' % (i, numpy.random.random()))
                 #print 'result shape: ', result.shape
                 interp_data[i,:,:] = result
             except Exception as e:
@@ -296,7 +299,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
                 assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] 
     return windows, targets, timestamps
 
-def pickle_dat(i, dataset):
+def pickle_dat(i, dataset, small = False):
     
     from solar.util import openz
 
@@ -313,7 +316,8 @@ def pickle_dat(i, dataset):
     dens_thresh = dataset['dens-thresh']
     
     # XXX gzip?
-    with openz('data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle' % 
+    base = 'data/satellite/processed/small' if small else 'data/satellite/processed'
+    with openz(base + '/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle' % 
             (delta_time, n_frames, n_channels, window_size, sample_stride[0], dens_thresh, n_samples, i), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
@@ -342,8 +346,8 @@ def main(
     window_size = 9, # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     delta_time = 1., # in hours
-    lat_range = (34., 38.),
-    lon_range = (-100., -96.), #oklahoma
+    lat_range = (30., 40.), #(34., 38.),
+    lon_range = (-100., -90.),#(-100., -96.), #oklahoma
     dlat = 0.1,
     dlon = 0.1,
     interp_buffer = (2,2),
@@ -351,7 +355,7 @@ def main(
     sample_stride = 1,
     normalized = True,
     nper_file = 100000,
-    files = None,
+    files = 1000,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -381,6 +385,7 @@ def main(
     zipped_paths = glob.glob(path + '*.nc.gz')
     paths = glob.glob(path + '*.nc')
     paths.extend(zipped_paths)
+    paths = sorted(paths)
 
     assert len(paths) > 0
 
@@ -586,7 +591,7 @@ def main(
                   }
         print 'number of samples in file: ', dataset['windows'].shape[0]
         assert dataset['windows'].shape[0] <= nper_file
-        pool.apply_async(pickle_dat, args = [i, dataset])
+        pool.apply_async(pickle_dat, args = [i, dataset,True if files else False])
         
     pool.close()
     pool.join()

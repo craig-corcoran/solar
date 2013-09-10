@@ -116,6 +116,8 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
         def accumulate_errors(self, inp):
             #print 'accumulate error input: ', inp
             ts_error, tr_error, wts = inp # XXX test and training different?
+            #print 'test error: ', ts_error
+            #print 'train error: ', tr_error
             self.test_error[self.ind] = ts_error
             self.train_error[self.ind] = tr_error
             self.weights = wts if self.weights is None else self.weights + wts
@@ -152,19 +154,64 @@ def crossval(model, inputs, targets, n_folds, center, target_index):
 
     #return errors.test_error / float(n_folds), errors.train_error / float(n_folds), errors.weights / float(n_folds)
 
+class Dataset(object):
+    
+    def __init__(self, n_samples, n_frames, n_channels, n_wind_cells):
+        self.data = {}
+        self.n_frames = n_frames
+        self.n_channels = n_channels
+        self.inputs = numpy.zeros((n_samples, n_frames, n_channels, n_wind_cells)) * numpy.nan
+        self.targets = numpy.zeros((n_samples, n_channels)) * numpy.nan
+        self.timestamps = numpy.zeros((n_samples, n_frames+1), dtype = object) * numpy.nan        
+        self.i = 0
+
+    def accumulate(self, ds):
+        if self.i == 0:
+            print 'first accumulate'
+            self.data = copy.deepcopy(ds)
+            self.data['windows'] = self.inputs
+            self.data['targets'] = self.targets
+            self.data['timestamps'] = self.timestamps
+        else:
+            print 'not first accumulate'
+            # assert parameters are consistent across batch
+            assert self.data['input-names'] == ds['input-names']
+            #assert (self.data['norm-stats'] == ds['norm-stats']).all()
+            assert self.data['n-samples'] == ds['n-samples']
+            assert self.data['n-frames'] == ds['n-frames'] == self.n_frames
+            assert self.data['n-channels'] == ds['n-channels'] == self.n_channels
+            #assert self.data['sample-strid'] == ds['sample-stride'] 
+            #assert self.data['dens-thresh'] == ds['dens-thresh'] 
+            #assert self.data['lon-range'] == ds['lat-range']
+            #assert self.data['dlat'] == ds['dlat']
+            #assert self.data['dlon'] == ds['dlon']
+            #assert self.data['dt'] == ds['dt']
+            #assert self.data['window-shape'] == ds['window-shape']
+            #assert self.data['normalized'] == ds['normalized']
+    
+        print 'current index: ', self.i
+        print ds['windows'].shape
+        ns = ds['windows'].shape[0]
+        self.inputs[self.i:self.i+ns] = ds['windows']
+        self.targets[self.i:self.i+ns] = ds['targets']
+        self.timestamps[self.i:self.i+ns] = ds['timestamps']
+        self.i += ns        
+        print 'new index: ', self.i 
+
+
 def unpack_dataset(path):
     with open(path) as data_file:
         return pickle.load(data_file)  
 
 def test_models(
-    data_dir = 'data/satellite/processed/',
+    data_dir = 'data/satellite/processed/small/', # small
     target_channel = 'swd_sfc',
     n_folds = 10,
     size = 9,
     n_frames = 1,
     delta_time = 1., # in hours
     n_channels = 3,
-    max_samples = 100000,
+    max_samples = None,
     center = True):
     
     # XXX gzip?
@@ -188,51 +235,7 @@ def test_models(
         '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle',
         path).groups()
     n_frames, n_channels, wind_size, n_samples = map(int, par_grp)
-    n_wind_cells = wind_size**2
-    
-    class Dataset(object):
-        
-        def __init__(self, n_samples, n_frames, n_channels, n_wind_cells):
-            self.data = {}
-            self.n_frames = n_frames
-            self.n_channels = n_channels
-            self.inputs = numpy.zeros((n_samples, n_frames, n_channels, n_wind_cells)) * numpy.nan
-            self.targets = numpy.zeros((n_samples, n_channels)) * numpy.nan
-            self.timestamps = numpy.zeros((n_samples, n_frames+1), dtype = object) * numpy.nan        
-            self.i = 0
-
-        def accumulate(self, ds):
-            if self.i == 0:
-                print 'first accumulate'
-                self.data = copy.deepcopy(ds)
-                self.data['windows'] = self.inputs
-                self.data['targets'] = self.targets
-                self.data['timestamps'] = self.timestamps
-            else:
-                print 'not first accumulate'
-                # assert parameters are consistent across batch
-                assert self.data['input-names'] == ds['input-names']
-                #assert (self.data['norm-stats'] == ds['norm-stats']).all()
-                assert self.data['n-samples'] == ds['n-samples']
-                assert self.data['n-frames'] == ds['n-frames'] == self.n_frames
-                assert self.data['n-channels'] == ds['n-channels'] == self.n_channels
-                #assert self.data['sample-strid'] == ds['sample-stride'] 
-                #assert self.data['dens-thresh'] == ds['dens-thresh'] 
-                #assert self.data['lon-range'] == ds['lat-range']
-                #assert self.data['dlat'] == ds['dlat']
-                #assert self.data['dlon'] == ds['dlon']
-                #assert self.data['dt'] == ds['dt']
-                #assert self.data['window-shape'] == ds['window-shape']
-                #assert self.data['normalized'] == ds['normalized']
-        
-            print 'current index: ', self.i
-            print ds['windows'].shape
-            ns = ds['windows'].shape[0]
-            self.inputs[self.i:self.i+ns] = ds['windows']
-            self.targets[self.i:self.i+ns] = ds['targets']
-            self.timestamps[self.i:self.i+ns] = ds['timestamps']
-            self.i += ns        
-            print 'new index: ', self.i     
+    n_wind_cells = wind_size**2    
 
     dataset = Dataset(n_samples, n_frames, n_channels, n_wind_cells)
         
@@ -310,10 +313,10 @@ def run_experiment(size, n_frames, delta_time, n_channels):
 def performance_tests(
                      def_size = 11,
                      def_n_frames = 1,
-                     def_delta_time = 3.,
+                     def_delta_time = 3,
                      def_n_channels = 3,
                      to_vary = 'sizes', # 'num-frames', delta-times'
-                     params = [19], # [2,3,4], [3.,6.,24.] [3,5,7,9,11,
+                     params = [3,5,7,9,11,15,19]
                      ):
 
     class DataTable(object):
@@ -356,9 +359,11 @@ def performance_tests(
         
         #pool.apply_async(run_experiment, args=inputs, callback = data_table.update_frame)
         data_table.update_frame(apply(run_experiment, inputs))
-
-        timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
-        data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.%s.csv' % (to_vary, timestamp))
+        
+        
+    dt = inputs[2]    
+    timestamp = str(datetime.datetime.now().replace(microsecond=0)).replace(' ','|')
+    data_table.data.to_csv('data/satellite/output/ar_performance_tests.%s.dt-%i.%s.csv' % (to_vary, dt, timestamp))
 
         
     #pool.close()
@@ -373,13 +378,54 @@ def plot_performance(data_dir = 'data/satellite/output/'):
     
     paths = glob.glob(data_dir + 'ar_performance_tests*.csv')
     paths = sorted(paths)
-    print 'using most recent: ', paths[-1]
-    df = pandas.read_csv(paths[-1]) # read most recent results
+    
+    #print 'using most recent: ', paths[-1]
+    #use_path = paths[-1] # most recent
+    
+    #use_path = data_dir + 'ar_performance_tests.sizes.dt-3.2013-09-05|12:40:05.csv'
+    use_path = data_dir + 'ar_performance_tests.sizes.dt-1.2013-09-05|12:05:22.csv'
+    df = pandas.read_csv(use_path) 
+
+    grp = re.match('.*ar_performance_tests.*\.dt-(\d+)\..*\.csv',
+        use_path).groups()
+    delta_time = int(grp[0])
     
     print df 
     # performance v window size
-    #plt.subplot(311,1)
+    plt.subplot(211)
     gb = df.groupby(['n-frames','delta-time','n-channels'])
+    for indx, group in gb:
+        print indx
+        print group
+        print type(group)
+        print 'number of rows: ', len(group.index)
+        #print 'ar errors: ', numpy.array(group['ar-test-error'].values[0][1:-1].split(']['), dtype = float) 
+
+        plt.fill_between(group['window-size'].values, 
+                        group['ar-test-error'].values - group['ar-test-std'].values, 
+                        group['ar-test-error'].values + group['ar-test-std'].values, 
+                        alpha=0.1, linewidth=0, color = 'g')
+        plt.plot(group['window-size'], group['ar-test-error'], label = ' AR test', color = 'g')
+
+        plt.fill_between(group['window-size'].values, 
+                        group['ar-train-error'].values - group['ar-train-std'].values, 
+                        group['ar-train-error'].values + group['ar-train-std'].values, 
+                        alpha=0.1, linewidth=0, color = 'b')
+        plt.plot(group['window-size'], group['ar-train-error'], label = ' AR train', color = 'b')
+
+        plt.fill_between(group['window-size'].values, 
+                        group['np-test-error'].values - group['np-test-std'].values, 
+                        group['np-test-error'].values + group['np-test-std'].values, 
+                        alpha=0.1, linewidth=0, color = 'r')
+        plt.plot(group['window-size'], group['np-test-error'], label = ' Eulerian test', color = 'r')
+        
+    plt.legend(loc = 'center right')
+    plt.suptitle('%i Hour Forecast Performance v. Window Size' % delta_time, fontsize = 'large')
+    plt.xlabel('window size', fontsize = 'large')
+    plt.ylabel('RMSE $W/m^2$', fontsize = 'large')
+
+    plt.subplot(212)
+
     for indx, group in gb:
         print indx
         print group
@@ -391,21 +437,25 @@ def plot_performance(data_dir = 'data/satellite/output/'):
         #                group['ar-test-error'].values - group['ar-test-std'].values, 
         #                group['ar-test-error'].values + group['ar-test-std'].values, 
         #                alpha=0.1, linewidth=0, color = 'g')
-        plt.plot(group['window-size'], group['ar-test-error'], label = ' AR test', color = 'g')
+        plt.plot(group['window-size'], 100*(group['np-test-error'].values - group['ar-test-error'].values) / group['np-test-error'].values  , label = ' AR test', color = 'g')
 
         #plt.fill_between(group['window-size'].values, 
         #                group['ar-train-error'].values - group['ar-train-std'].values, 
         #                group['ar-train-error'].values + group['ar-train-std'].values, 
         #                alpha=0.1, linewidth=0, color = 'b')
-        #plt.plot(group['window-size'], group['ar-train-error'], label = ' AR train', color = 'b')
+        plt.plot(group['window-size'], 100*(group['np-train-error'].values - group['ar-train-error'].values) / group['np-test-error'].values, label = ' AR train', color = 'b')
 
         #plt.fill_between(group['window-size'].values, 
         #                group['np-test-error'].values - group['np-test-std'].values, 
         #                group['np-test-error'].values + group['np-test-std'].values, 
         #                alpha=0.1, linewidth=0, color = 'r')
-        plt.plot(group['window-size'], group['np-test-error'], label = ' NP test', color = 'r')
-        
-    plt.legend(loc = 'center right')
+        #plt.plot(group['window-size'], group['np-test-error'], label = ' NP test', color = 'r')
+    
+    #plt.title('Autoregression Performance v. Window Size')
+    plt.xlabel('window size', fontsize = 'large')
+    plt.ylabel('% better than Eulerian', fontsize = 'large')
+    plt.legend(loc = 'lower right', fontsize = 'large')
+
     
     # performance v number of frames
     #plt.subplot(311,2)
@@ -427,13 +477,103 @@ def plot_performance(data_dir = 'data/satellite/output/'):
     #    plt.plot(df['delta-time'], df['np-train-error'], label = str(indx)+' NP train')
     #plt.legend()
 
-    plt.savefig(paths[-1][:-4] + '.png')
+    plt.savefig(use_path[:-4] + '.png')
 
 
-def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = True):
+def load_dataset(
+    data_dir = 'data/satellite/processed/', # small
+    target_channel = 'swd_sfc',
+    size = 9,
+    n_frames = 1,
+    delta_time = 1., # in hours
+    n_channels = 3,
+    max_samples = None,
+    center = True):
     
-    wt_img = weight[:-1,-1] if center else weight[:,-1]
-    wt_img = numpy.reshape(wt_img, (n_frames, n_channels, n_dims))
+    # XXX gzip?
+    paths = glob.glob(data_dir + 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.0.pickle' % 
+            (delta_time, n_frames, n_channels, size))
+
+    assert len(paths) > 0
+    sorted(paths)
+    print 'matching files: ', paths
+
+    print 'using: ', paths[0]
+    
+    # find all files from the same batch
+    path = paths[0]
+    part = path[:-9] # XXX 11 if zipped
+    paths = glob.glob(part+'*.pickle')
+    
+    print 'len of paths: ', len(paths)
+
+    par_grp = re.match(
+        '.*goes.*\.nf-(\d+)\.nc-(\d+)\.ws-(\d+).*\.nsamp-(\d+)\.\d+\.pickle',
+        path).groups()
+    n_frames, n_channels, wind_size, n_samples = map(int, par_grp)
+    n_wind_cells = wind_size**2    
+
+    dataset = Dataset(n_samples, n_frames, n_channels, n_wind_cells)
+        
+    print 'min cpus for pool: ', min(mp.cpu_count, len(paths))
+    
+    pool = mp.Pool(min(mp.cpu_count(), len(paths)))
+    print 'paths: ', paths
+    for p in paths:
+        print 'opening file: ', p 
+        pool.apply_async(unpack_dataset, args = [p], callback=dataset.accumulate)
+        #dataset.accumulate(apply(unpack_dataset, [p]))
+    
+    pool.close()
+    pool.join()
+
+    # did we fill all the spaces we expected?
+    assert not (numpy.isnan(dataset.inputs)).any()
+    assert not (numpy.isnan(dataset.targets)).any()
+    #assert not (numpy.isnan(dataset.timestamps)).any()
+    assert n_samples == dataset.data['n-samples']
+    
+    print 'files loaded'
+
+    input_names = dataset.data['input-names']
+    target_index = input_names.index(target_channel)
+    targets = dataset.targets[:,target_index]
+    mn,std = dataset.data['norm-stats'][target_index,:]
+    inputs = dataset.inputs
+    
+    n_samples, nf, nc, n_dims = inputs.shape
+    assert nf == n_frames
+    assert nc == n_channels
+    assert size**2 == n_dims
+
+    if max_samples is not None:
+        targets = targets[:max_samples]
+        inputs = inputs[:max_samples]
+
+    return inputs, targets
+
+
+def plot_weights(n_frames = 1, 
+                n_channels = 3,  
+                delta_time = 1, 
+                size = 9, 
+                names = ['tau', 'cloud fraction', 'surface irradiance'],
+                center = True,
+                l2reg = 1.):
+
+    inputs, targets = load_dataset(
+                            size = size,
+                            n_frames = n_frames,
+                            delta_time = delta_time, # in hours
+                            n_channels = n_channels,
+                            center = center)
+    
+    n_dims = size**2
+
+    m = ARmodel(inputs, targets, l2reg = l2reg)
+    
+    weights = m.theta[:-1] if center else m.theta
+    wt_img = numpy.reshape(weights, (n_frames, n_channels, n_dims))
 
     vmin = numpy.min(wt_img)
     vmax = numpy.max(wt_img)
@@ -455,11 +595,20 @@ def plot_weights(weight, n_frames, n_channels, n_dims, size, names, center = Tru
                                  origin = 'lower',
                                  interpolation = 'nearest'
                                  )
-            grid[ind].title.set_text(names[i])
+            #grid[ind].title.set_text(names[i], fontsize = 'large')
                 
     grid.cbar_axes[0].colorbar(im) #, format='%.2f')
-    plt.savefig('ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, size))
+    #grid.xlabel('longitude (0.1 degrees)', fontsize = 'large')
+    #grid.ylabel('latitude (0.1 degrees)', fontsize = 'large')
+    plt.savefig('data/satellite/output/ar_weights.nf-%i.nc-%i.ws-%i.png' % (n_frames, n_channels, size))
+
+def plot_weights_range(delta_time = 1, sizes = [11], l2reg = 0.5):
+    
+    for s in sizes:
+        plot_weights(delta_time = delta_time, size = s, l2reg = l2reg)
 
 if __name__ == '__main__':
     #plac.call(plot_performance)
-    plac.call(performance_tests)
+    #plac.call(performance_tests)
+    #plac.call(plot_weights)
+    plot_weights_range()
