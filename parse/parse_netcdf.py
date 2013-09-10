@@ -211,8 +211,6 @@ def parse_nc(
                 result = scipy.interpolate.griddata((lat,lon), val, 
                                         (lat_grid,lon_grid), method = 'cubic')
 
-                pyplot.imshow(result, cmap = 'jet')
-                pyplot.savefig('interpolated.%i.%f.png' % (i, numpy.random.random()))
                 #print 'result shape: ', result.shape
                 interp_data[i,:,:] = result
             except Exception as e:
@@ -342,12 +340,12 @@ files = ('number of total files to process', 'option', None, int),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
+    path = 'data/satellite/raw/small/', # gsipL3_g13_GENHEM_20131',
     window_size = 9, # (n_lat, n_lon)
     n_frames = 1, # number of frames into the past used for prediction 
     delta_time = 1., # in hours
-    lat_range = (30., 40.), #(34., 38.),
-    lon_range = (-100., -90.),#(-100., -96.), #oklahoma
+    lat_range = (34., 38.),
+    lon_range = (-100., -96.), #oklahoma
     dlat = 0.1,
     dlon = 0.1,
     interp_buffer = (2,2),
