@@ -6,15 +6,10 @@ import numpy
 import pandas
 import functools
 import itertools as it
-#import condor
 import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
 import matplotlib.pyplot as pyplot
-from scipy import interpolate
-
-# XXX whats the difference between missing and mask?
-# XXX store non-spatial parameters separately?
 
 class GoesData(object):
 
@@ -22,12 +17,13 @@ class GoesData(object):
     into the native units and parse into a pandas dataframe '''
     
     def __init__(self, path, inputs, lat_range = None, lon_range = None, 
-                interp_buffer = None, use_masked = True):
+                interp_buffer = None, use_masked = True, gzip = False):
         
         self.inputs = inputs
         self.lat_range = lat_range
         self.lon_range = lon_range
         self.interp_buffer = interp_buffer
+        self.gzip = gzip
         
         # read netcdf file into pandas data frame
         self.frame, self.meta = self.nc_to_frame(path, use_masked = use_masked) # removes all but lat, lon, inputs, and datetime
@@ -72,8 +68,6 @@ class GoesData(object):
         values and regions outside lat/lon range + iterpolation buffer. keeps
         only date, time, lat, lon, and inputs'''
     
-        #print 'path: ', path
-
         if '.gz' == path[-3:]: 
             os.system("gunzip %s" % path)
             path = path[:-3]
@@ -81,7 +75,8 @@ class GoesData(object):
         
         try:
             ds = ncdf.Dataset(path) # NetCDF dataset
-            #os.system("gzip --fast %s" % path)
+            if self.gzip:
+                os.system("gzip --fast %s" % path)
         except RuntimeError as e:
             print 'corrupted file, deleting: ', path
             print e
@@ -101,7 +96,6 @@ class GoesData(object):
         for head, var in ds.variables.items():
             # only keep subset of data we care about
             if head in keep:
-                
 
                 data, mask = self._data_from_var(var)
                 if len(data) == 1:
@@ -164,6 +158,7 @@ class GoesData(object):
                             datetime.day, 
                             hour) 
 
+# XXX plac annotate
 def parse_nc(
              path, 
              inputs, 
@@ -182,15 +177,20 @@ def parse_nc(
              dlon,
              sample_stride,
              dens_thresh,
-             window_shape
+             window_shape,
+             gzip
              ):
+    ''' 
+    parses a netCDF file into a dictionary of samples restricting to lat and lon
+    range and requiring at least dens_thresh observation density. 
+    '''
 
     #print 'parsing', path
 
     import scipy.interpolate
     samples = {}
     
-    gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer)
+    gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer, gzip = gzip)
     
     if gd.frame is None: return None
 
@@ -205,20 +205,15 @@ def parse_nc(
             lon = not_missing['lon_rad'].values
             val = not_missing[inp].values
             try:
-                #print 'interpolating'
-                # XXX why wont this parallelize, and should we be smoothing?
-                # strangely, only nearest works now with parallelism where cubic did before (since numpy vers change?)
                 result = scipy.interpolate.griddata((lat,lon), val, 
                                         (lat_grid,lon_grid), method = 'cubic')
 
-                pyplot.imshow(result, cmap = 'jet')
-                pyplot.savefig('interpolated.%i.%f.png' % (i, numpy.random.random()))
-                #print 'result shape: ', result.shape
+                #pyplot.imshow(result, cmap = 'jet') # XXX move to indep func?
+                #pyplot.savefig('interpolated.%i.%f.png' % (i, numpy.random.random()))
                 interp_data[i,:,:] = result
             except Exception as e:
                 print e
     
-    #print 'dropping missing data'
     # drop grid cells missing any of the inputs
     gd.frame['lat_ind'] = numpy.floor((gd.frame['lat_rad'] - rad_lat_min) / dlat).astype(int)
     gd.frame['lon_ind'] = numpy.floor((gd.frame['lon_rad'] - rad_lon_min) / dlon).astype(int)
@@ -228,7 +223,6 @@ def parse_nc(
     grid = grid.dropna(how = 'any', subset = inputs)
     
     # for each window position given stride length
-    #print 'iterating over window positions'
     for x, y in it.product(numpy.arange(0, n_lat_cells - window_shape[0], sample_stride[0]), 
                            numpy.arange(0, n_lon_cells - window_shape[1], sample_stride[1])):
 
@@ -239,21 +233,17 @@ def parse_nc(
 
         interp_window = interp_data[:,x:x+window_shape[0], 
                                       y:y+window_shape[1]]
-        # XXX best way to determine observation density?
+        # XXX is this the best way to determine observation density?
         # if density of observed data is high enough and there are no nans in the interpolated data
         if (len(present) > (dens_thresh * n_wind_cells)) & (not numpy.isnan(interp_window).any()):
-            #print 'storing data point'
-            # store this window as a sample by times    tep and position
+            # store this window as a sample by timestep and position
             samples[(gd.timestamp, (x,y))] = interp_window
     
-    #print 'parsed: ',  gd.timestamp
     return samples
 
 def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape):
     ''' find sequences of n_frames + 1 with delta_time (in hours) between each 
     frame. The last frame's center pixel is used as the target value'''
-    
-    #print 'parsing location frame'
 
     data_frame.reset_index(inplace = True)
     
@@ -264,9 +254,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
 
     windows = None; targets = None; timestamps = None
     for i in data_frame.index:
-
-        #print 'row %i of %i' % (i, len(data_frame.index))
-        
+ 
         row = data_frame.iloc[i]
         time = row['datetime']
         
@@ -276,7 +264,6 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
             
         next_rows = data_frame[mask]
         if len(next_rows) == (n_frames): # if there are n_frames valid frames
-            #print 'valid frame'
             next_rows.sort('datetime')
             winds = numpy.empty((n_frames, n_channels, n_wind_cells))
             winds[0] = numpy.reshape(row['array'], (n_channels, n_wind_cells))
@@ -299,7 +286,7 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
                 assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] 
     return windows, targets, timestamps
 
-def pickle_dat(i, dataset, small = False):
+def pickle_dat(i, dataset, gzip = False):
     
     from solar.util import openz
 
@@ -315,14 +302,14 @@ def pickle_dat(i, dataset, small = False):
     sample_stride = dataset['sample-stride']
     dens_thresh = dataset['dens-thresh']
     
-    # XXX gzip?
-    base = 'data/satellite/processed/small' if small else 'data/satellite/processed'
-    with openz(base + '/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle' % 
-            (delta_time, n_frames, n_channels, window_size, sample_stride[0], dens_thresh, n_samples, i), 'wb') as pfile:
+    path_name = 'data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle'
+    if gzip:
+        path_name = path_name + '.gz'
+    with openz(path_name % (delta_time, n_frames, n_channels, window_size, 
+               sample_stride[0], dens_thresh, n_samples, i), 'wb') as pfile:
         pickle.dump(dataset, pfile)
 
 
-# swd, frac_ice/water/total, tau, olr, 
 #(help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
 path = ('path to netCDF (.nc) file', 'option', None, str),
@@ -338,24 +325,24 @@ dens_thresh = ('fraction of full observation density that must be present for sa
 sample_stride = ('grid cells (pixels) to move over/down when scanning to collect samples', 'option', None, int),
 normalized = ('boolean switch for setting data mean to 0 and covariance to 1' , 'option', None, bool),
 nper_file = ('number of samples per file', 'option', None, int),
-files = ('number of total files to process', 'option', None, int),
+gzip = ('should we zip the processed files while pickling, trades speed for space', 'option', None, bool),
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    path = 'data/satellite/raw/', # gsipL3_g13_GENHEM_20131',
-    window_size = 9, # (n_lat, n_lon)
-    n_frames = 1, # number of frames into the past used for prediction 
-    delta_time = 1., # in hours
-    lat_range = (30., 40.), #(34., 38.),
-    lon_range = (-100., -90.),#(-100., -96.), #oklahoma
+    path = 'data/satellite/raw/', 
+    window_size = 9,
+    n_frames = 1, 
+    delta_time = 1., 
+    lat_range = (34., 38.),  #oklahoma: (34,38), (-100,-96)
+    lon_range = (-100., -96.),
     dlat = 0.1,
     dlon = 0.1,
     interp_buffer = (2,2),
     dens_thresh = 0.6,
     sample_stride = 1,
     normalized = True,
-    nper_file = 100000,
-    files = 1000,
+    nper_file = 50000,
+    gzip = False,
     inputs = [
             #'ch2','ch2_cld','ch2_std',
             #'ch9',
@@ -423,7 +410,7 @@ def main(
     print 'number of time lags: ', n_frames
     print 'number of channels: ', n_channels
 
-    part_parse_nc = functools.partial(parse_nc, # xxx make number of params smaller?
+    part_parse_nc = functools.partial(parse_nc, 
                      inputs = inputs, 
                      lat_range = lat_range, 
                      lon_range = lon_range, 
@@ -440,35 +427,13 @@ def main(
                      dlon = dlon,
                      sample_stride = sample_stride,
                      dens_thresh = dens_thresh,
-                     window_shape = window_shape)
+                     window_shape = window_shape,
+                     gzip = gzip)
 
-    
-    #n_files = 1000
-    #def yield_jobs():
-    #    for p in paths[:n_files]:
-    #        yield (part_parse_nc, [p])
-    #
-    #samples = {}
-    #for (_, out) in condor.do(yield_jobs(), workers):
-    #    if out is not None:
-    #        samples.update(out)
-
-    #samples = DictWrap()
-    #for p in paths:
-    #    samples.update(part_parse_nc(p))
-    #class DictWrap(object):
-        
-        #def __init__(self):
-            #self.d = {}
-
-        #def update(self, nd):
-            #if nd is not None:
-                #self.d.update(nd)
     samples = {}
     #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
     pool = mp.Pool(int(mp.cpu_count()*0.75))
-    files = len(paths) if files is None else files
-    dicts = pool.map_async(part_parse_nc, paths[:files]).get()
+    dicts = pool.map_async(part_parse_nc, paths).get()
     map(samples.update, dicts)
     
     #samples = samples.d
@@ -518,7 +483,6 @@ def main(
                         self.targets = numpy.append(self.targets, targs, axis = 0)
                         self.timestamps = numpy.append(self.timestamps, times, axis = 0)
 
-    # XXX move normalization and pickling to sample set object?
     sample_set = SampleSet()
     
     pool = mp.Pool(mp.cpu_count())
@@ -591,7 +555,7 @@ def main(
                   }
         print 'number of samples in file: ', dataset['windows'].shape[0]
         assert dataset['windows'].shape[0] <= nper_file
-        pool.apply_async(pickle_dat, args = [i, dataset,True if files else False])
+        pool.apply_async(pickle_dat, args = [i, dataset])
         
     pool.close()
     pool.join()
