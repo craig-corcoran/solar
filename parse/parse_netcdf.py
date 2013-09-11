@@ -9,6 +9,7 @@ import itertools as it
 import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
+import scipy.interpolate
 import matplotlib.pyplot as pyplot
 
 class GoesData(object):
@@ -187,7 +188,6 @@ def parse_nc(
 
     #print 'parsing', path
 
-    import scipy.interpolate
     samples = {}
     
     gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer, gzip = gzip)
@@ -210,6 +210,7 @@ def parse_nc(
 
                 #pyplot.imshow(result, cmap = 'jet') # XXX move to indep func?
                 #pyplot.savefig('interpolated.%i.%f.png' % (i, numpy.random.random()))
+                #print 'result shape: ', result.shape
                 interp_data[i,:,:] = result
             except Exception as e:
                 print e
