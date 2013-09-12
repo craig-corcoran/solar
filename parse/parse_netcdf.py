@@ -1,7 +1,6 @@
 import os
 import plac
 import glob
-import copy
 import numpy
 import pandas
 import functools
@@ -10,7 +9,6 @@ import multiprocessing as mp
 import cPickle as pickle
 import netCDF4 as ncdf
 import scipy.interpolate
-import matplotlib.pyplot as pyplot
 
 class GoesData(object):
 
@@ -159,17 +157,14 @@ class GoesData(object):
                             datetime.day, 
                             hour) 
 
-# XXX plac annotate
 def parse_nc(
              path, 
              inputs, 
              lat_range, 
              lon_range, 
              interp_buffer, 
-             n_channels, 
              n_lat_cells, 
              n_lon_cells,
-             n_wind_cells,
              lat_grid,
              lon_grid,
              rad_lat_min,
@@ -184,15 +179,34 @@ def parse_nc(
     ''' 
     parses a netCDF file into a dictionary of samples restricting to lat and lon
     range and requiring at least dens_thresh observation density. 
-    '''
 
-    #print 'parsing', path
+     path : path to netCDF file, can be *.nc or *.nc.gz
+     inputs : list of input channels to be used
+     lat_range : tuple (latitude min, latitude_max) 
+     lon_range : tuple (longitude min, longitude_max) 
+     interp_buffer : tuple of pixels to pad around used region for interpolation 
+     n_lat_cells : number of latitude pixels/cells in entire region of interest
+     n_lon_cells : number of longitude pixels/cells in entire region of interest
+     lat_grid : list of latitude positions for interpolation grid
+     lon_grid : list of longitude positions for interpolation grid
+     rad_lat_min : min latitude in radians (see latlon_to_thetaphi above)
+     rad_lon_min : min longitude in radians (see latlon_to_thetaphi above) 
+     dlat : delta latitude in radians for each grid pixel/cell
+     dlon : delta longitude in radians for each grid pixel/cell
+     sample_stride : tuple of number of pixels to move when scanning for samples 
+     dens_thresh : observation density necessary for 'valid' samples 
+     window_shape : tuple of window size (width, height)
+     gzip : boolean, zip files after reading them? (can still read *.nz.gz if false)
+    '''
 
     samples = {}
     
     gd = GoesData(path, inputs, lat_range, lon_range, interp_buffer, gzip = gzip)
     
     if gd.frame is None: return None
+
+    n_wind_cells = window_shape[0]*window_shape[1]
+    n_channels = len(inputs)
 
     interp_data = numpy.zeros((n_channels, n_lat_cells, n_lon_cells)) * numpy.nan
     # perform interpolation for each input
@@ -243,6 +257,7 @@ def parse_nc(
     return samples
 
 def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape):
+
     ''' find sequences of n_frames + 1 with delta_time (in hours) between each 
     frame. The last frame's center pixel is used as the target value'''
 
@@ -287,7 +302,11 @@ def split_loc_samples(data_frame, n_frames, n_channels, delta_time, window_shape
                 assert windows.shape[0] == targets.shape[0] == timestamps.shape[0] 
     return windows, targets, timestamps
 
-def pickle_dat(i, dataset, gzip = False):
+def pickle_dat(i, dataset, out_path, gzip = False):
+
+    ''' pickles the given dataset dictionary with file number i in the out path
+    directory. Additionally gzips if gzip is True.
+    '''
     
     from solar.util import openz
 
@@ -303,7 +322,7 @@ def pickle_dat(i, dataset, gzip = False):
     sample_stride = dataset['sample-stride']
     dens_thresh = dataset['dens-thresh']
     
-    path_name = 'data/satellite/processed/goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle'
+    path_name = out_path + 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-%i.dens-%0.1f.nsamp-%i.%i.pickle'
     if gzip:
         path_name = path_name + '.gz'
     with openz(path_name % (delta_time, n_frames, n_channels, window_size, 
@@ -311,14 +330,15 @@ def pickle_dat(i, dataset, gzip = False):
         pickle.dump(dataset, pfile)
 
 
-#(help, kind, abbrev, type, choices, metavar)
+# plac annotations are of the form (help, kind, abbrev, type, choices, metavar)
 @plac.annotations(
-path = ('path to netCDF (.nc) file', 'option', None, str),
-window_size = ('2-tuple shape of sample grid window', 'option', None, int),
+in_path = ('path and option prefix for netCDF (.nc) files, can use regular expressions (as with ls)', 'option', None, str),
+out_path = ('directory where processed files will be placed', 'option', None, str),
+window_size = ('size of sample grid window, assumed square', 'option', None, int),
 n_frames = ('number of past timesteps into the past used for prediction', 'option', None, int),
 delta_time = ('difference in time between samples in hours', 'option', None, float),    
-lat_range = ('2-tuple of min and max latitudes to use for samples in degrees', 'option', None, None),
-lon_range = ('2-tuple of min and max longitudes to use for samples in degrees', 'option', None, None),
+lat_range = ('2-tuple of min and max latitudes to use for samples in degrees, ex: OK is (34., 38.)', 'option', None, None),
+lon_range = ('2-tuple of min and max longitudes to use for samples in degrees, ex: OK is (-100., -96.)', 'option', None, None),
 dlat = ('delta latitude for interpolated grid', 'option', None, float),
 dlon = ('delta longitude for interpolated grid', 'option', None, float),
 interp_buffer = ('2-tuple in degrees of buffer around lat/lon_range to include for interpolation', 'option', None, None),
@@ -330,11 +350,12 @@ gzip = ('should we zip the processed files while pickling, trades speed for spac
 inputs = ('list of variable (short) names to be used as input channels in samples', 'option', None, None)
 )
 def main(
-    path = 'data/satellite/raw/', 
+    in_path = 'data/satellite/raw/', 
+    out_path = 'data/satellite/processed/', 
     window_size = 9,
     n_frames = 1, 
     delta_time = 1., 
-    lat_range = (34., 38.),  #oklahoma: (34,38), (-100,-96)
+    lat_range = (34., 38.), 
     lon_range = (-100., -96.),
     dlat = 0.1,
     dlon = 0.1,
@@ -370,8 +391,8 @@ def main(
     input grids and target values for the given input channels
     '''
     
-    zipped_paths = glob.glob(path + '*.nc.gz')
-    paths = glob.glob(path + '*.nc')
+    zipped_paths = glob.glob(in_path + '*.nc.gz')
+    paths = glob.glob(in_path + '*.nc')
     paths.extend(zipped_paths)
     paths = sorted(paths)
 
@@ -398,14 +419,13 @@ def main(
 
     n_lat_cells = numpy.ceil(lat_diff / dlat).astype(int)
     n_lon_cells = numpy.ceil(lon_diff / dlon).astype(int)
-    n_wind_cells = window_shape[0]*window_shape[1]
     n_channels = len(inputs)
 
     lat_grid, lon_grid = numpy.mgrid[
         rad_lat_min : rad_lat_max : n_lat_cells*1j,
         rad_lon_min : rad_lon_max : n_lon_cells*1j]
     
-    print 'processing files from ', path
+    print 'processing files from ', in_path
     print 'window shape: ', window_shape
     print 'delta time (hours): ', delta_time
     print 'number of time lags: ', n_frames
@@ -416,10 +436,8 @@ def main(
                      lat_range = lat_range, 
                      lon_range = lon_range, 
                      interp_buffer = interp_buffer, 
-                     n_channels = n_channels, 
                      n_lat_cells = n_lat_cells, 
                      n_lon_cells = n_lon_cells,
-                     n_wind_cells = n_wind_cells,
                      lat_grid = lat_grid,
                      lon_grid = lon_grid,
                      rad_lat_min = rad_lat_min,
@@ -432,12 +450,10 @@ def main(
                      gzip = gzip)
 
     samples = {}
-    #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid())
+    #os.system("taskset -p 0xffffffffffffffff %d" % os.getpid()) # sometimes numpy restricts process to using 1 cpu, undoes this
     pool = mp.Pool(int(mp.cpu_count()*0.75))
     dicts = pool.map_async(part_parse_nc, paths).get()
     map(samples.update, dicts)
-    
-    #samples = samples.d
 
     assert len(samples) > 0
 
@@ -523,7 +539,6 @@ def main(
             print 'target std after normalization: ', numpy.std(sample_set.targets[:,i])
      
     # windows is shape (n_samples, n_frames, n_channels, n_wind_cells)
-
     n_samples = sample_set.windows.shape[0]
     n_files = numpy.ceil(n_samples / float(nper_file)).astype(int)
 
@@ -552,11 +567,11 @@ def main(
                   'dt':delta_time,
                   'window-shape': window_shape,
                   'normalized':normalized,
-                  'data-path':path
+                  'data-path':in_path
                   }
         print 'number of samples in file: ', dataset['windows'].shape[0]
         assert dataset['windows'].shape[0] <= nper_file
-        pool.apply_async(pickle_dat, args = [i, dataset])
+        pool.apply_async(pickle_dat, args = [i, dataset, out_path, gzip])
         
     pool.close()
     pool.join()
