@@ -136,39 +136,19 @@ class Dataset(object):
         self.timestamps[self.i:self.i+ns] = ds['timestamps']
         self.i += ns
 
-
-def unpack_dataset(path):
-    ''' unpickle the object at the specified path, possibly gzipped '''
-    with openz(path) as data_file:
-        return pickle.load(data_file)  
-
-def get_models_performances(
-    data_dir = 'data/satellite/processed/',
+def load_dataset(
+    data_dir = 'data/satellite/processed/', 
     target_channel = 'swd_sfc',
-    n_folds = 10,
     size = 9,
     n_frames = 1,
-    delta_time = 1., 
+    delta_time = 1., # in hours
     n_channels = 3,
-    center = True, 
+    center = True,
     gzip = False):
 
-    ''' unpacks all processed (pickled) data from the data_dir, then evaluates
-    the performance of a neutral predictor and a linear AR model using n_folds
-    fold crossvalidation 
-    
-    data_dir : directory to read data files from, will use all files in this 
-               directory with matching parameters
+    ''' loads a dataset with the given parameters from data_dir, returns inputs 
+    and targets. For variable details, see get models performances'''
 
-    target_channel : string, name of the channel we want to predict 
-    n_folds : int, number of folds used for crossvalidation
-    size : int, size of square window of inputs, each input channel is size x size in dimension
-    n_frames : int, number of time frames into the past. n_frames = 1 corresponds to an AR1 model
-    delta_time : float, prediction interval in hours, also time difference between frames (if > 1)
-    n_channels : int, number of channels in the input signal
-    center : boolean, should we use a constant feature (effectively centering the data)?
-    '''
-    
     file_string = 'goes-insolation.dt-%0.1f.nf-%i.nc-%i.ws-%i.str-*.dens-*.nsamp-*.0.pickle'
     if gzip: file_string += '.gz'
     paths = glob.glob(data_dir + file_string % 
@@ -224,6 +204,43 @@ def get_models_performances(
     assert nf == n_frames
     assert nc == n_channels
     assert size**2 == n_dims
+
+    return inputs, targets
+
+def unpack_dataset(path):
+    ''' unpickle the object at the specified path, possibly gzipped '''
+    with openz(path) as data_file:
+        return pickle.load(data_file)
+
+def get_models_performances(
+    data_dir = 'data/satellite/processed/',
+    target_channel = 'swd_sfc',
+    n_folds = 10,
+    size = 9,
+    n_frames = 1,
+    delta_time = 1., 
+    n_channels = 3,
+    center = True, 
+    gzip = False):
+
+    ''' unpacks all processed (pickled) data from the data_dir, then evaluates
+    the performance of a neutral predictor and a linear AR model using n_folds
+    fold crossvalidation 
+    
+    data_dir : directory to read data files from, will use all files in this 
+               directory with matching parameters
+
+    target_channel : string, name of the channel we want to predict 
+    n_folds : int, number of folds used for crossvalidation
+    size : int, size of square window of inputs, each input channel is size x size in dimension
+    n_frames : int, number of time frames into the past. n_frames = 1 corresponds to an AR1 model
+    delta_time : float, prediction interval in hours, also time difference between frames (if > 1)
+    n_channels : int, number of channels in the input signal
+    center : boolean, should we use a constant feature (effectively centering the data)?
+    '''
+    
+    inputs, targets = load_dataset(data_dir, target_channel, size, n_frames, 
+                                    delta_time, n_channels, center, gzip)
     
     print 'performing crossval for AR'
     ar_results = crossval(ARmodel, inputs, targets, n_folds, center, target_index)
@@ -263,13 +280,13 @@ def run_experiment(size, n_frames, delta_time, n_channels):
             'delta-time' : delta_time,
             'n-channels' : n_channels}
 
-# XXX input, output directory?
+# XXX input, output directory? ['sizes', 'num-frames', 'delta-times'] 
 @plac.annotations(
 def_size = ('default window size, used if to_vary is not sizes', 'option', None, int),
 def_n_frames = ('default number of frames into the past used, used if to_vary is not num-frames', 'option', None, int),
 def_delta_time = ('default forecast interval and time between frames in hours, used if to_vart is not delta-times', 'option', None, float),
 def_n_channels = ('default number of channels, currently no to_vary for channels', 'option', None, int),
-to_vary = ('quantity that is being varied for this experiment', 'option', ['sizes', 'num-frames', 'delta-times'], str),
+to_vary = ('quantity that is being varied for this experiment', 'option', None, str),
 params = ('values used for to_vary quantity, usually a list of ints', 'option', None, None))
 def performance_experiment(
                      def_size = 11,
