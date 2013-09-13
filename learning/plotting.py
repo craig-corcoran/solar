@@ -72,7 +72,7 @@ def plot_weights(n_frames = 1,
 
 @plac.annotations(
 data_dir = ('directory in which the csv performance file is stored', 'option', None, str),
-plot_file = ('particular csv file to use, if None most recent is used', 'option', None, float)
+plot_file = ('particular csv file to use, if None last file in alphanumeric order is used (will be most recent, except prefer longer intervals)', 'option', None, float)
 )
 def plot_performance(data_dir = 'data/satellite/output/', plot_file = None):
     ''' read a window size v performance csv file and plot the corresponding data'''
@@ -80,7 +80,7 @@ def plot_performance(data_dir = 'data/satellite/output/', plot_file = None):
     paths = sorted(paths)
     
     if plot_file is None:
-        print 'using most recent: ', paths[-1]
+        print 'using last file: ', paths[-1]
         use_path = paths[-1] # most recent
     
     else:
@@ -134,6 +134,6 @@ def plot_performance(data_dir = 'data/satellite/output/', plot_file = None):
 
 if __name__ == '__main__':
     
-    plac.call(plot_performance)
-    #plac.call(plot_weights)
+    #plac.call(plot_performance)
+    plac.call(plot_weights)
 

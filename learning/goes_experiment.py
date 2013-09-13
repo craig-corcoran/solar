@@ -280,7 +280,7 @@ def run_experiment(size, n_frames, delta_time, n_channels):
             'delta-time' : delta_time,
             'n-channels' : n_channels}
 
-# XXX input, output directory? ['sizes', 'num-frames', 'delta-times'] 
+# XXX input, output directory? ['sizes', 'num-frames', 'delta-times'], n_folds
 @plac.annotations(
 def_size = ('default window size, used if to_vary is not sizes', 'option', None, int),
 def_n_frames = ('default number of frames into the past used, used if to_vary is not num-frames', 'option', None, int),
